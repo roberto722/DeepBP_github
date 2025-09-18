@@ -98,14 +98,15 @@ def build_backproj_lut(geom: LinearProbeGeom, device: torch.device) -> torch.Ten
 
     # Convert time to fractional temporal index
     K = (T - geom.t0_s) / geom.dt_s                 # (ny, nx, n_det)
-    K_floor = np.floor(K).astype(np.int32)
+    K_floor = np.floor(K)
     Alpha = (K - K_floor).astype(np.float32)
+    K_floor = K_floor.astype(np.float32)
 
     # Pack LUT (t_idx_floor, alpha)
-    lut = np.stack([K_floor, Alpha], axis=-1)       # (ny, nx, n_det, 2)
+    lut = np.stack([K_floor, Alpha], axis=-1).astype(np.float32)  # (ny, nx, n_det, 2)
 
-    # To torch
-    lut_t = torch.from_numpy(lut).to(device)
+    # To torch (ensure float32 dtype)
+    lut_t = torch.from_numpy(lut).to(device=device, dtype=torch.float32)
     return lut_t
 
 
@@ -122,7 +123,7 @@ class BackProjectionLinear(nn.Module):
     def __init__(self, geom: LinearProbeGeom, lut: torch.Tensor):
         super().__init__()
         self.geom = geom
-        self.register_buffer("lut", lut)  # (ny, nx, n_det, 2)
+        self.register_buffer("lut", lut.to(dtype=torch.float32))  # (ny, nx, n_det, 2)
         # Optional apodization per-detector (Hanning). Shape (n_det,)
         win = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(geom.n_det) / max(geom.n_det - 1, 1))
         self.register_buffer("apod", torch.from_numpy(win.astype(np.float32)))  # (n_det,)
@@ -138,7 +139,7 @@ class BackProjectionLinear(nn.Module):
 
         # Extract LUT components
         k_floor = self.lut[..., 0].long()      # (ny, nx, n_det)
-        alpha   = self.lut[..., 1]             # (ny, nx, n_det)
+        alpha   = self.lut[..., 1].to(dtype=sino.dtype)  # (ny, nx, n_det)
 
         # Clamp indices and build valid mask (0 <= k_floor < n_t-1)
         valid = (k_floor >= 0) & (k_floor < (n_t - 1))
@@ -165,7 +166,8 @@ class BackProjectionLinear(nn.Module):
         # We'll gather per-detector time then select detector via advanced indexing.
         # A practical route: loop over detector dimension to keep memory reasonable & simple.
         # (n_det is typically O(64-256), loop is acceptable and safe in FP32)
-        apod = self.apod  # (n_det,)
+        apod = self.apod.to(dtype=sino.dtype)  # (n_det,)
+        one = torch.tensor(1.0, dtype=sino.dtype, device=sino.device)
         for d in range(self.geom.n_det):
             # time indices for this detector across the image grid
             k0_d = k0e[..., d]  # (B, ny, nx)
@@ -178,14 +180,14 @@ class BackProjectionLinear(nn.Module):
             s1 = S[:, d, :].gather(dim=1, index=k1_d.view(B, -1)).view(B, self.geom.ny, self.geom.nx)
 
             # Linear interpolation
-            sk = (1.0 - a_d) * s0 + a_d * s1
+            sk = (one - a_d) * s0 + a_d * s1
 
             # Mask out-of-range, apply apodization, and accumulate
             sk = torch.where(v_d, sk, torch.zeros_like(sk))
             out += apod[d] * sk
 
         # Normalize by number of detectors (and apodization sum) to keep scale stable
-        norm = self.apod.sum().clamp(min=1e-6)
+        norm = torch.clamp(apod.sum(), min=torch.finfo(apod.dtype).tiny)
         out = out / norm
 
         return out.unsqueeze(1)  # [B, 1, ny, nx]
