@@ -125,7 +125,7 @@ def main():
                 require_target=False,
             )
 
-            sino_norm, bp_img, pred_img, intermediates = run_inference_steps(
+            sino_norm, bp_img, pred_img, iter_imgs = run_inference_steps(
                 model,
                 sinogram_raw,
                 cfg,
@@ -151,6 +151,37 @@ def main():
 
             st.caption(f"File: {sample_label}")
             plot_outputs(images, sinogram=True)
+
+            if iter_imgs:
+                total_steps = len(iter_imgs)
+                iter_arrays: List[np.ndarray] = []
+                iter_labels: List[str] = []
+                for idx, step_tensor in enumerate(iter_imgs):
+                    sample_tensor = step_tensor[0] if step_tensor.dim() > 0 else step_tensor
+                    iter_arrays.append(tensor_to_numpy(sample_tensor))
+                    if idx == 0:
+                        label = f"Step {idx} (BP)"
+                    elif idx == total_steps - 1:
+                        label = f"Step {idx} (finale)"
+                    else:
+                        label = f"Step {idx}"
+                    iter_labels.append(label)
+
+                st.subheader("Iterazioni del modello")
+                selected_label = st.selectbox(
+                    "Seleziona uno step da visualizzare",
+                    iter_labels,
+                    index=len(iter_labels) - 1,
+                )
+                selected_idx = iter_labels.index(selected_label)
+                st.image(
+                    iter_arrays[selected_idx],
+                    caption=selected_label,
+                    use_column_width=True,
+                    clamp=True,
+                )
+            else:
+                st.info("Il modello non restituisce step intermedi da visualizzare.")
         except Exception as exc:
             st.error(f"Errore durante l'elaborazione: {exc}")
         finally:
