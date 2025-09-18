@@ -351,10 +351,21 @@ def psnr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8):
     mse = mse.flatten(1).mean(dim=1)
     return 10.0 * torch.log10(1.0 / (mse + eps))
 
-def ssim(pred: torch.Tensor, target: torch.Tensor, C1=0.01**2, C2=0.03**2, window=11):
+def ssim(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    C1=0.01**2,
+    C2=0.03**2,
+    window=11,
+    mask: Optional[torch.Tensor] = None,
+):
     """
     Very lightweight SSIM approximation on single-channel images.
     Assumes inputs normalized to [0,1]. Not a full reference implementation, but good for monitoring.
+
+    If ``mask`` is provided it must broadcast to the image shape ``[B, 1, H, W]`` and only
+    masked pixels contribute to the spatial average. When the mask is empty the global
+    average is returned as a safe fallback.
     """
     # Gaussian window approximation with uniform kernel for simplicity
     pad = window // 2
@@ -371,8 +382,26 @@ def ssim(pred: torch.Tensor, target: torch.Tensor, C1=0.01**2, C2=0.03**2, windo
     ssim_n = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
     ssim_d = (mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2)
     ssim_map = ssim_n / (ssim_d + 1e-8)
-    # Mean over spatial dims per-batch
-    return ssim_map.flatten(1).mean(dim=1)
+    ssim_flat = ssim_map.flatten(1)
+
+    if mask is None:
+        # Mean over spatial dims per-batch
+        return ssim_flat.mean(dim=1)
+
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+    if mask.shape != ssim_map.shape:
+        raise ValueError(
+            f"Mask shape {tuple(mask.shape)} incompatible with SSIM map shape {tuple(ssim_map.shape)}"
+        )
+
+    mask = mask.to(ssim_map.dtype)
+    mask_flat = mask.flatten(1)
+    masked_sum = (ssim_flat * mask_flat).sum(dim=1)
+    mask_norm = mask_flat.sum(dim=1)
+    global_mean = ssim_flat.mean(dim=1)
+    masked_mean = masked_sum / mask_norm.clamp_min(1.0)
+    return torch.where(mask_norm > 0, masked_mean, global_mean)
 
 # ================================
 # Side-by-side saver
@@ -424,11 +453,34 @@ def compute_intensity_weights(img: torch.Tensor, alpha: float, threshold: Option
     return weights
 
 
+def build_bright_mask(
+    img: torch.Tensor,
+    threshold: Optional[float],
+    dilation: int = 0,
+) -> torch.Tensor:
+    """Create a binary mask highlighting bright regions in ``img``."""
+    if threshold is None:
+        mask = torch.ones_like(img)
+    else:
+        mask = (img > threshold).to(img.dtype)
+
+    if dilation and dilation > 0:
+        kernel = 2 * dilation + 1
+        mask = F.max_pool2d(mask, kernel_size=kernel, stride=1, padding=dilation)
+        mask = (mask > 0).to(img.dtype)
+
+    return mask
+
+
 def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epoch,
              save_dir: Optional[str] = None, max_save: int = 8,
-             weight_alpha: float = 0.0, weight_threshold: Optional[float] = None):
+             weight_alpha: float = 0.0, weight_threshold: Optional[float] = None,
+             ssim_mask_threshold: Optional[float] = None, ssim_mask_dilation: int = 0):
     model.eval()
     agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
+    compute_masked_ssim = ssim_mask_threshold is not None
+    if compute_masked_ssim:
+        agg['masked_ssim'] = 0.0
     n = 0
     saved = 0
     with torch.no_grad():  # NOTE: no autocast anywhere (pure FP32)
@@ -444,12 +496,18 @@ def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epo
             weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
             batch_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
+            if compute_masked_ssim:
+                mask = build_bright_mask(img, ssim_mask_threshold, dilation=ssim_mask_dilation)
+                batch_masked_ssim = ssim(pred, img, mask=mask).mean()
+
             bs = sino.size(0)
             n += bs
             agg['psnr'] += batch_psnr.item() * bs
             agg['ssim'] += batch_ssim.item() * bs
             agg['l1']   += batch_l1.item() * bs
             agg['weighted_l1'] += batch_weighted_l1.item() * bs
+            if compute_masked_ssim:
+                agg['masked_ssim'] += batch_masked_ssim.item() * bs
 
             # Save a few side-by-side for inspection
             if save_dir is not None and saved < max_save:
@@ -551,6 +609,8 @@ class TrainConfig:
     clip_grad: float = 1.0
     weight_alpha: float = 1.0
     weight_threshold: Optional[float] = 0.5
+    ssim_mask_threshold: Optional[float] = 0.5
+    ssim_mask_dilation: int = 0
 
     # --- Global scaling (per-domain) ---
     # If any of these is None, stats will be computed from the training set.
@@ -665,7 +725,9 @@ def main():
                        save_dir=img_dir if cfg.save_val_images else None,
                        max_save=cfg.max_val_images,
                        weight_alpha=cfg.weight_alpha,
-                       weight_threshold=cfg.weight_threshold)
+                       weight_threshold=cfg.weight_threshold,
+                       ssim_mask_threshold=cfg.ssim_mask_threshold,
+                       ssim_mask_dilation=cfg.ssim_mask_dilation)
 
         scheduler.step()
 
@@ -675,6 +737,7 @@ def main():
             "train_weighted_l1": tr["weighted_l1"],
             "val_psnr": val["psnr"],   "val_ssim":  val["ssim"],  "val_l1":  val["l1"],
             "val_weighted_l1": val["weighted_l1"],
+            "val_masked_ssim": val.get("masked_ssim"),
             "lr": scheduler.get_last_lr()[0]
         }
         print(json.dumps(log, indent=2))
