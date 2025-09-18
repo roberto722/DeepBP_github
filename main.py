@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from dataset import HDF5Dataset, minmax_scale
 
 # ================================
@@ -678,6 +679,7 @@ def validate(
     weight_threshold: Optional[float] = None,
     ssim_mask_threshold: Optional[float] = None,
     ssim_mask_dilation: int = 0,
+    use_tqdm: bool = True,
 ):
     model.eval()
     agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
@@ -687,7 +689,9 @@ def validate(
     n = 0
     saved = 0
     with torch.no_grad():  # NOTE: no autocast anywhere (pure FP32)
-        for i, (sino, img) in enumerate(loader):
+        progress = tqdm(loader, desc="Val") if use_tqdm else None
+        iterator = progress if progress is not None else loader
+        for i, (sino, img) in enumerate(iterator):
             sino = sino.to(device, non_blocking=True)
             img  = img.to(device, non_blocking=True)
 
@@ -720,6 +724,18 @@ def validate(
             if compute_masked_ssim:
                 agg['masked_ssim'] += batch_masked_ssim.item() * bs
 
+            if progress is not None:
+                denom = max(n, 1)
+                postfix = {
+                    'psnr': f"{agg['psnr'] / denom:.4f}",
+                    'ssim': f"{agg['ssim'] / denom:.4f}",
+                    'l1': f"{agg['l1'] / denom:.4f}",
+                    'w_l1': f"{agg['weighted_l1'] / denom:.4f}",
+                }
+                if compute_masked_ssim:
+                    postfix['masked_ssim'] = f"{agg['masked_ssim'] / denom:.4f}"
+                progress.set_postfix(postfix)
+
             # Save a few side-by-side for inspection
             if save_dir is not None and saved < max_save:
                 for b in range(min(bs, max_save - saved)):
@@ -751,6 +767,9 @@ def validate(
                     )
                     saved += 1
 
+        if progress is not None:
+            progress.close()
+
     for k in agg:
         agg[k] /= max(n, 1)
     return agg
@@ -758,11 +777,13 @@ def validate(
 
 def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, device: torch.device,
                     clip_grad: float = 1.0, weight_alpha: float = 0.0,
-                    weight_threshold: Optional[float] = None):
+                    weight_threshold: Optional[float] = None, use_tqdm: bool = True):
     model.train()
     agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
     n = 0
-    for i, (sino, img) in enumerate(loader):
+    progress = tqdm(loader, desc="Train") if use_tqdm else None
+    iterator = progress if progress is not None else loader
+    for i, (sino, img) in enumerate(iterator):
         sino = sino.to(device, non_blocking=True)
         img  = img.to(device, non_blocking=True)
 
@@ -788,8 +809,19 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, device: tor
             agg['psnr'] += psnr(pred, img).mean().item() * bs
             agg['ssim'] += ssim(pred, img).mean().item() * bs
 
+            if progress is not None:
+                denom = max(n, 1)
+                progress.set_postfix({
+                    'psnr': f"{agg['psnr'] / denom:.4f}",
+                    'ssim': f"{agg['ssim'] / denom:.4f}",
+                    'l1': f"{agg['l1'] / denom:.4f}",
+                    'w_l1': f"{agg['weighted_l1'] / denom:.4f}",
+                })
+
     for k in agg:
         agg[k] /= max(n, 1)
+    if progress is not None:
+        progress.close()
     return agg
 
 @torch.no_grad()
@@ -846,6 +878,7 @@ class TrainConfig:
     lr: float = 2e-4
     num_workers: int = 4
     clip_grad: float = 1.0
+    use_tqdm: bool = True
     weight_alpha: float = 1.0
     weight_threshold: Optional[float] = 0.5
     ssim_mask_threshold: Optional[float] = 0.5
@@ -1007,6 +1040,7 @@ def main():
             clip_grad=cfg.clip_grad,
             weight_alpha=cfg.weight_alpha,
             weight_threshold=cfg.weight_threshold,
+            use_tqdm=cfg.use_tqdm,
         )
         val = validate(
             model,
@@ -1020,6 +1054,7 @@ def main():
             weight_threshold=cfg.weight_threshold,
             ssim_mask_threshold=cfg.ssim_mask_threshold,
             ssim_mask_dilation=cfg.ssim_mask_dilation,
+            use_tqdm=cfg.use_tqdm,
         )
 
         scheduler.step()
