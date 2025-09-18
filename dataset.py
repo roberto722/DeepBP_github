@@ -7,7 +7,6 @@ import torch.nn.functional as F
 import nibabel as nib
 from torch.utils.data import Dataset
 
-import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
 

@@ -690,7 +690,7 @@ def main():
     model = create_model(cfg, device)
 
     # Optimizer (only ViT is trainable)
-    optimizer = torch.optim.AdamW(model.vit.parameters(), lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.vit.parameters(), lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     # Datasets / Loaders (replace with your real datasets)
