@@ -1,12 +1,18 @@
 """Streamlit dashboard per esplorare il modello BPTransformer."""
 import os
+import sys
 import tempfile
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from dataset import load_hdf5_sample, minmax_scale
 from main import (
