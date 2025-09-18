@@ -176,8 +176,8 @@ class BackProjectionLinear(nn.Module):
             v_d  = ve[..., d]
 
             # Gather S[:, d, k] -> (B, ny, nx)
-            s0 = S[:, d, :].gather(dim=1, index=k0_d.view(B, -1)).view(B, self.geom.ny, self.geom.nx)
-            s1 = S[:, d, :].gather(dim=1, index=k1_d.view(B, -1)).view(B, self.geom.ny, self.geom.nx)
+            s0 = S[:, d, :].gather(dim=1, index=k0_d.reshape(B, -1)).reshape(B, self.geom.ny, self.geom.nx)
+            s1 = S[:, d, :].gather(dim=1, index=k1_d.reshape(B, -1)).reshape(B, self.geom.ny, self.geom.nx)
 
             # Linear interpolation
             sk = (one - a_d) * s0 + a_d * s1
