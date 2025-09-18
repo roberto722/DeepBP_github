@@ -5,7 +5,7 @@ import json
 import random
 import shutil
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -389,28 +389,74 @@ class ViTRefiner(nn.Module):
 # ================================
 
 class BPTransformer(nn.Module):
-    def __init__(self, bp: BackProjectionLinear, vit: ViTRefiner):
+    def __init__(self, bp: BackProjectionLinear, vit: ViTRefiner, freeze_bp: bool = True):
         super().__init__()
         self.bp = bp
         self.vit = vit
-        # Freeze BP if you want it strictly non-trainable
-        for p in self.bp.parameters():
-            p.requires_grad = False
+        if freeze_bp:
+            for p in self.bp.parameters():
+                p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
         bp_img = self.bp(sino)     # [B, 1, H, W]
         out = self.vit(bp_img)     # [B, 1, H, W]
-        return out, bp_img
+        intermediates = [out]
+        return out, bp_img, intermediates
+
+
+class UnrolledBPTransformer(nn.Module):
+    def __init__(
+        self,
+        bp_module: BackProjectionLinear,
+        forward_module: ForwardProjectionLinear,
+        vit_module: ViTRefiner,
+        num_steps: int,
+        data_consistency_weight: float = 1.0,
+        learnable_data_consistency_weight: bool = False,
+        freeze_bp: bool = False,
+    ):
+        super().__init__()
+        if num_steps < 1:
+            raise ValueError("num_steps must be >= 1 for UnrolledBPTransformer")
+        self.bp = bp_module
+        self.forward_projector = forward_module
+        self.vit = vit_module
+        self.num_steps = int(num_steps)
+        weight = torch.tensor(float(data_consistency_weight), dtype=torch.float32)
+        if learnable_data_consistency_weight:
+            self.data_consistency_weight = nn.Parameter(weight)
+        else:
+            self.register_buffer("data_consistency_weight", weight)
+        if freeze_bp:
+            for p in self.bp.parameters():
+                p.requires_grad = False
+
+    def forward(self, sino: torch.Tensor):
+        x0 = self.bp(sino)
+        xi = x0
+        intermediates: List[torch.Tensor] = []
+
+        weight = self.data_consistency_weight.view(1, 1, 1, 1)
+
+        for _ in range(self.num_steps):
+            sino_est = self.forward_projector(xi)
+            sino_residual = sino - sino_est
+            correction = self.bp(sino_residual)
+            xi = xi + weight * correction
+            xi = self.vit(xi)
+            intermediates.append(xi)
+
+        return xi, x0, intermediates
 
 
 def run_inference_steps(
-    model: BPTransformer,
+    model: nn.Module,
     sinogram: torch.Tensor,
     cfg: "TrainConfig",
     device: Optional[torch.device] = None,
     normalize: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return normalized sinogram, BP image and ViT output for a given input."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+    """Return normalized sinogram, BP image, final output and per-step intermediates."""
     if device is None:
         device = next(model.parameters()).device
 
@@ -430,12 +476,13 @@ def run_inference_steps(
 
     model.eval()
     with torch.no_grad():
-        pred, bp_img = model(sino_norm)
+        pred, bp_img, intermediates = model(sino_norm)
 
     return (
         sino_norm.detach().cpu(),
         bp_img.detach().cpu(),
         pred.detach().cpu(),
+        [step.detach().cpu() for step in intermediates],
     )
 
 # ================================
@@ -569,7 +616,7 @@ def build_bright_mask(
     return mask
 
 
-def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epoch,
+def validate(model: nn.Module, loader: DataLoader, device: torch.device, epoch,
              save_dir: Optional[str] = None, max_save: int = 8,
              weight_alpha: float = 0.0, weight_threshold: Optional[float] = None,
              ssim_mask_threshold: Optional[float] = None, ssim_mask_dilation: int = 0):
@@ -585,7 +632,7 @@ def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epo
             sino = sino.to(device, non_blocking=True)
             img  = img.to(device, non_blocking=True)
 
-            pred, bp = model(sino)            # forward in FP32
+            pred, bp, intermediates = model(sino)            # forward in FP32
             # Metrics per-sample
             batch_psnr = psnr(pred, img).mean()
             batch_ssim = ssim(pred, img).mean()
@@ -618,7 +665,7 @@ def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epo
     return agg
 
 
-def train_one_epoch(model: BPTransformer, loader: DataLoader, optimizer, device: torch.device,
+def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, device: torch.device,
                     clip_grad: float = 1.0, weight_alpha: float = 0.0,
                     weight_threshold: Optional[float] = None):
     model.train()
@@ -628,14 +675,17 @@ def train_one_epoch(model: BPTransformer, loader: DataLoader, optimizer, device:
         sino = sino.to(device, non_blocking=True)
         img  = img.to(device, non_blocking=True)
 
-        pred, _ = model(sino)                     # forward in FP32
+        pred, bp_img, intermediates = model(sino)                     # forward in FP32
         weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
         loss_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
         optimizer.zero_grad(set_to_none=True)
         loss_weighted_l1.backward()               # backprop in FP32
         if clip_grad is not None and clip_grad > 0:
-            torch.nn.utils.clip_grad_norm_(model.vit.parameters(), clip_grad)
+            torch.nn.utils.clip_grad_norm_(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                clip_grad,
+            )
         optimizer.step()
 
         # metrics on-the-fly
@@ -697,6 +747,7 @@ class TrainConfig:
     array_x0_m: float = -0.019         # align first element with left image border (example)
     array_y_m: float = 0.0
     wavelength: int = 800
+    trainable_apodization: bool = False
 
     # Training
     epochs: int = 50
@@ -708,6 +759,12 @@ class TrainConfig:
     weight_threshold: Optional[float] = 0.5
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
+
+    # Model variants
+    model_variant: str = "baseline"
+    unroll_steps: int = 5
+    data_consistency_weight: float = 1.0
+    learnable_data_consistency_weight: bool = False
 
     # --- Global scaling (per-domain) ---
     # If any of these is None, stats will be computed from the training set.
@@ -748,21 +805,43 @@ def build_projection_operators(
     return bp, fp
 
 
-def create_model(cfg: TrainConfig, device: torch.device) -> BPTransformer:
+def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
     """Build BPTransformer (BP + ViT) according to the provided configuration."""
-    bp, _ = build_projection_operators(cfg, device)
+    bp, fp = build_projection_operators(
+        cfg,
+        device,
+        trainable_apodization=cfg.trainable_apodization,
+    )
     vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
     if cfg.ny % vit.patch != 0 or cfg.nx % vit.patch != 0:
         raise ValueError(
             f"Image dimensions (ny={cfg.ny}, nx={cfg.nx}) must be divisible by ViT patch size {vit.patch}."
         )
     vit._build_pos_embed(cfg.ny // vit.patch, cfg.nx // vit.patch, vit.embed_dim, device)
-    model = BPTransformer(bp, vit).to(device)
+    freeze_bp = not cfg.trainable_apodization
+    variant = cfg.model_variant.lower()
+    if variant == "unrolled":
+        if cfg.unroll_steps < 1:
+            raise ValueError("TrainConfig.unroll_steps must be >= 1 for the unrolled variant")
+        model = UnrolledBPTransformer(
+            bp,
+            fp,
+            vit,
+            num_steps=cfg.unroll_steps,
+            data_consistency_weight=cfg.data_consistency_weight,
+            learnable_data_consistency_weight=cfg.learnable_data_consistency_weight,
+            freeze_bp=freeze_bp,
+        )
+    elif variant in {"baseline", "bp_transformer"}:
+        model = BPTransformer(bp, vit, freeze_bp=freeze_bp)
+    else:
+        raise ValueError(f"Unknown model variant '{cfg.model_variant}'.")
+    model = model.to(device)
     return model
 
 
 def load_checkpoint(
-    model: BPTransformer,
+    model: nn.Module,
     cfg: TrainConfig,
     checkpoint: str = "best.pt",
     map_location: Optional[torch.device] = None,
@@ -797,8 +876,16 @@ def main():
     # Build model (BP module + ViT)
     model = create_model(cfg, device)
 
-    # Optimizer (only ViT is trainable)
-    optimizer = torch.optim.AdamW(model.vit.parameters(), lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-3)
+    # Optimizer (train all parameters requiring gradients)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_params:
+        raise ValueError("No trainable parameters found in the model configuration.")
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=cfg.lr,
+        betas=(0.9, 0.999),
+        weight_decay=1e-3,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
 
     # Datasets / Loaders (replace with your real datasets)

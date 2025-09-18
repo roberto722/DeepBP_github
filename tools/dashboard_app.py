@@ -125,7 +125,7 @@ def main():
                 require_target=False,
             )
 
-            sino_norm, bp_img, pred_img = run_inference_steps(
+            sino_norm, bp_img, pred_img, intermediates = run_inference_steps(
                 model,
                 sinogram_raw,
                 cfg,
