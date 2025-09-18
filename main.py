@@ -251,6 +251,7 @@ class ViTRefiner(nn.Module):
         super().__init__()
         self.patch = patch
         self.embed = PatchEmbed(in_ch, embed_dim, patch)
+        self.embed_dim = embed_dim
         self.pos_embed = None  # created on first forward based on (Hp, Wp)
         self.encoder = TransformerEncoder(embed_dim, depth, heads, mlp_ratio, p_drop)
         self.proj_out = nn.Linear(embed_dim, patch*patch)  # predict patch pixels
@@ -557,6 +558,11 @@ def create_model(cfg: TrainConfig, device: torch.device) -> BPTransformer:
     lut = build_backproj_lut(geom, device=device)
     bp = BackProjectionLinear(geom, lut)
     vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
+    if cfg.ny % vit.patch != 0 or cfg.nx % vit.patch != 0:
+        raise ValueError(
+            f"Image dimensions (ny={cfg.ny}, nx={cfg.nx}) must be divisible by ViT patch size {vit.patch}."
+        )
+    vit._build_pos_embed(cfg.ny // vit.patch, cfg.nx // vit.patch, vit.embed_dim, device)
     model = BPTransformer(bp, vit).to(device)
     return model
 
