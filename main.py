@@ -5,7 +5,7 @@ import json
 import random
 import shutil
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from dataset import HDF5Dataset
+from dataset import HDF5Dataset, minmax_scale
 
 # ================================
 # Utilities & Repro
@@ -301,6 +301,42 @@ class BPTransformer(nn.Module):
         out = self.vit(bp_img)     # [B, 1, H, W]
         return out, bp_img
 
+
+def run_inference_steps(
+    model: BPTransformer,
+    sinogram: torch.Tensor,
+    cfg: "TrainConfig",
+    device: Optional[torch.device] = None,
+    normalize: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return normalized sinogram, BP image and ViT output for a given input."""
+    if device is None:
+        device = next(model.parameters()).device
+
+    if sinogram.dim() == 2:
+        sinogram = sinogram.unsqueeze(0).unsqueeze(0)
+    elif sinogram.dim() == 3:
+        if sinogram.shape[0] != 1 and sinogram.shape[1] != 1:
+            sinogram = sinogram.unsqueeze(1)
+        elif sinogram.shape[0] == 1:
+            sinogram = sinogram.unsqueeze(0)
+    elif sinogram.dim() != 4:
+        raise ValueError(f"Unexpected sinogram shape: {tuple(sinogram.shape)}")
+
+    dtype = next(model.parameters()).dtype
+    sino = sinogram.to(device=device, dtype=dtype)
+    sino_norm = minmax_scale(sino, cfg.sino_min, cfg.sino_max) if normalize else sino
+
+    model.eval()
+    with torch.no_grad():
+        pred, bp_img = model(sino_norm)
+
+    return (
+        sino_norm.detach().cpu(),
+        bp_img.detach().cpu(),
+        pred.detach().cpu(),
+    )
+
 # ================================
 # Metrics (PSNR/SSIM/L1)
 # ================================
@@ -504,6 +540,47 @@ class TrainConfig:
     save_val_images: bool = True
     max_val_images: int = 2
 
+
+def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
+    """Utility to instantiate the acquisition geometry from the config."""
+    return LinearProbeGeom(
+        n_det=cfg.n_det, pitch_m=cfg.pitch_m,
+        t0_s=cfg.t0_s, dt_s=cfg.dt_s, n_t=cfg.n_t, c_m_s=cfg.c_m_s,
+        x0_m=cfg.x0_m, y0_m=cfg.y0_m, dx_m=cfg.dx_m, dy_m=cfg.dy_m,
+        nx=cfg.nx, ny=cfg.ny, array_x0_m=cfg.array_x0_m, array_y_m=cfg.array_y_m
+    )
+
+
+def create_model(cfg: TrainConfig, device: torch.device) -> BPTransformer:
+    """Build BPTransformer (BP + ViT) according to the provided configuration."""
+    geom = build_geometry(cfg)
+    lut = build_backproj_lut(geom, device=device)
+    bp = BackProjectionLinear(geom, lut)
+    vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
+    model = BPTransformer(bp, vit).to(device)
+    return model
+
+
+def load_checkpoint(
+    model: BPTransformer,
+    cfg: TrainConfig,
+    checkpoint: str = "best.pt",
+    map_location: Optional[torch.device] = None,
+) -> dict:
+    """Load model weights from ``cfg.work_dir`` and return the checkpoint payload."""
+    ckpt_path = os.path.join(cfg.work_dir, checkpoint)
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
+
+    if map_location is None:
+        map_location = next(model.parameters()).device
+
+    payload = torch.load(ckpt_path, map_location=map_location)
+    state_dict = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+    model.load_state_dict(state_dict)
+    model.eval()
+    return payload
+
 def main():
     seed_everything(1337)
 
@@ -517,19 +594,8 @@ def main():
     img_dir = os.path.join(cfg.work_dir, "val_images")
     os.makedirs(img_dir, exist_ok=True)
 
-    # Build geometry and LUT
-    geom = LinearProbeGeom(
-        n_det=cfg.n_det, pitch_m=cfg.pitch_m,
-        t0_s=cfg.t0_s, dt_s=cfg.dt_s, n_t=cfg.n_t, c_m_s=cfg.c_m_s,
-        x0_m=cfg.x0_m, y0_m=cfg.y0_m, dx_m=cfg.dx_m, dy_m=cfg.dy_m,
-        nx=cfg.nx, ny=cfg.ny, array_x0_m=cfg.array_x0_m, array_y_m=cfg.array_y_m
-    )
-    lut = build_backproj_lut(geom, device=device)
-
-    # Build modules
-    bp  = BackProjectionLinear(geom, lut)
-    vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
-    model = BPTransformer(bp, vit).to(device)
+    # Build model (BP module + ViT)
+    model = create_model(cfg, device)
 
     # Optimizer (only ViT is trainable)
     optimizer = torch.optim.AdamW(model.vit.parameters(), lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-2)
