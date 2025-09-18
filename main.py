@@ -120,13 +120,45 @@ class BackProjectionLinear(nn.Module):
       * Out-of-range temporal indices are masked to zero contribution.
       * Summation over detectors approximates DAS (unweighted). You can add apodization later.
     """
-    def __init__(self, geom: LinearProbeGeom, lut: torch.Tensor):
+    def __init__(
+        self,
+        geom: LinearProbeGeom,
+        lut: torch.Tensor,
+        trainable_apodization: bool = False,
+    ):
         super().__init__()
         self.geom = geom
-        self.register_buffer("lut", lut.to(dtype=torch.float32))  # (ny, nx, n_det, 2)
+        self.trainable_apodization = trainable_apodization
+        lut = lut.to(dtype=torch.float32)
+        self.register_buffer("lut", lut)  # (ny, nx, n_det, 2)
+
+        # Pre-compute interpolation helpers (k0, alpha, valid mask)
+        k_floor = torch.floor(lut[..., 0])
+        valid = (k_floor >= 0) & (k_floor < (geom.n_t - 1))
+        max_idx = max(geom.n_t - 2, 0)
+        k0 = torch.clamp(k_floor, 0, max_idx).to(dtype=torch.long)
+        alpha = lut[..., 1].to(dtype=torch.float32)
+        self.register_buffer("k0", k0)
+        self.register_buffer("alpha", alpha)
+        self.register_buffer("valid", valid)
+
         # Optional apodization per-detector (Hanning). Shape (n_det,)
         win = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(geom.n_det) / max(geom.n_det - 1, 1))
-        self.register_buffer("apod", torch.from_numpy(win.astype(np.float32)))  # (n_det,)
+        apod = torch.from_numpy(win.astype(np.float32))
+        if trainable_apodization:
+            self.apod = nn.Parameter(apod)
+        else:
+            self.register_buffer("apod", apod)
+
+    def get_apodization(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """Return the apodization weights in the requested dtype/device."""
+        apod = self.apod
+        if self.trainable_apodization:
+            apod = apod.abs()
+        apod = apod.to(device=device, dtype=dtype)
+        if self.trainable_apodization:
+            apod = apod.clamp_min(torch.finfo(apod.dtype).tiny)
+        return apod
 
     def forward(self, sino: torch.Tensor) -> torch.Tensor:
         """
@@ -137,14 +169,13 @@ class BackProjectionLinear(nn.Module):
         assert C == 1, "Expect sinogram with a single channel."
         assert n_det == self.geom.n_det and n_t == self.geom.n_t, "Sinogram dims mismatch geometry."
 
-        # Extract LUT components
-        k_floor = self.lut[..., 0].long()      # (ny, nx, n_det)
-        alpha   = self.lut[..., 1].to(dtype=sino.dtype)  # (ny, nx, n_det)
-
-        # Clamp indices and build valid mask (0 <= k_floor < n_t-1)
-        valid = (k_floor >= 0) & (k_floor < (n_t - 1))
-        k0 = k_floor.clamp(0, n_t - 2)
+        # Reuse pre-computed interpolation helpers
+        k0 = self.k0
         k1 = k0 + 1
+        alpha = self.alpha
+        if alpha.dtype != sino.dtype:
+            alpha = alpha.to(dtype=sino.dtype)
+        valid = self.valid
 
         # Gather s(k0) and s(k1) from sino: need shapes aligned to (B, n_det, ny, nx)
         # We'll index per-detector and per-time, then interpolate and sum over detectors.
@@ -166,8 +197,7 @@ class BackProjectionLinear(nn.Module):
         # We'll gather per-detector time then select detector via advanced indexing.
         # A practical route: loop over detector dimension to keep memory reasonable & simple.
         # (n_det is typically O(64-256), loop is acceptable and safe in FP32)
-        apod = self.apod.to(dtype=sino.dtype)  # (n_det,)
-        one = torch.tensor(1.0, dtype=sino.dtype, device=sino.device)
+        apod = self.get_apodization(sino.dtype, sino.device)
         for d in range(self.geom.n_det):
             # time indices for this detector across the image grid
             k0_d = k0e[..., d]  # (B, ny, nx)
@@ -180,10 +210,10 @@ class BackProjectionLinear(nn.Module):
             s1 = S[:, d, :].gather(dim=1, index=k1_d.reshape(B, -1)).reshape(B, self.geom.ny, self.geom.nx)
 
             # Linear interpolation
-            sk = (one - a_d) * s0 + a_d * s1
+            sk = (1.0 - a_d) * s0 + a_d * s1
 
             # Mask out-of-range, apply apodization, and accumulate
-            sk = torch.where(v_d, sk, torch.zeros_like(sk))
+            sk = sk * v_d.to(sk.dtype)
             out += apod[d] * sk
 
         # Normalize by number of detectors (and apodization sum) to keep scale stable
@@ -191,6 +221,71 @@ class BackProjectionLinear(nn.Module):
         out = out / norm
 
         return out.unsqueeze(1)  # [B, 1, ny, nx]
+
+
+class ForwardProjectionLinear(nn.Module):
+    """
+    Differentiable forward projection that reuses the LUT/apodization from
+    :class:`BackProjectionLinear` for a linear array acquisition geometry.
+    Input:  image I with shape [B, 1, ny, nx]
+    Output: sinogram S with shape [B, 1, n_det, n_t]
+    """
+
+    def __init__(self, backproj: BackProjectionLinear):
+        super().__init__()
+        self.geom = backproj.geom
+        # Keep an internal reference without registering the module twice
+        object.__setattr__(self, "_backproj", backproj)
+
+    @property
+    def backproj(self) -> BackProjectionLinear:
+        return self._backproj
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        img: [B, 1, ny, nx]
+        returns: [B, 1, n_det, n_t]
+        """
+        B, C, ny, nx = img.shape
+        assert C == 1, "Expect image with a single channel."
+        assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
+
+        k0 = self.backproj.k0
+        if k0.device != img.device:
+            k0 = k0.to(device=img.device)
+        k1 = k0 + 1
+        alpha = self.backproj.alpha.to(device=img.device, dtype=img.dtype)
+        valid = self.backproj.valid
+        if valid.device != img.device:
+            valid = valid.to(device=img.device)
+
+        img_flat = img[:, 0, :, :].reshape(B, -1)  # [B, ny*nx]
+        sino = torch.zeros((B, self.geom.n_det, self.geom.n_t), device=img.device, dtype=img.dtype)
+
+        apod = self.backproj.get_apodization(img.dtype, img.device)
+
+        for d in range(self.geom.n_det):
+            k0_d = k0[..., d].reshape(-1)
+            k1_d = k1[..., d].reshape(-1)
+            alpha_d = alpha[..., d].reshape(-1)
+            valid_d = valid[..., d].reshape(-1)
+
+            mask = valid_d.to(dtype=img.dtype)
+            w0 = (1.0 - alpha_d) * mask
+            w1 = alpha_d * mask
+
+            idx0 = k0_d.unsqueeze(0).expand(B, -1)
+            idx1 = k1_d.unsqueeze(0).expand(B, -1)
+            src0 = img_flat * w0.unsqueeze(0)
+            src1 = img_flat * w1.unsqueeze(0)
+
+            sino[:, d, :].scatter_add_(dim=1, index=idx0, src=src0 * apod[d])
+            sino[:, d, :].scatter_add_(dim=1, index=idx1, src=src1 * apod[d])
+
+        norm = torch.clamp(apod.sum(), min=torch.finfo(apod.dtype).tiny)
+        sino = sino / norm
+
+        return sino.unsqueeze(1)
 
 # ================================
 # Lightweight ViT-like Refiner
@@ -640,11 +735,22 @@ def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
     )
 
 
-def create_model(cfg: TrainConfig, device: torch.device) -> BPTransformer:
-    """Build BPTransformer (BP + ViT) according to the provided configuration."""
+def build_projection_operators(
+    cfg: TrainConfig,
+    device: torch.device,
+    trainable_apodization: bool = False,
+) -> Tuple[BackProjectionLinear, ForwardProjectionLinear]:
+    """Construct back- and forward-projection operators sharing the same LUT."""
     geom = build_geometry(cfg)
     lut = build_backproj_lut(geom, device=device)
-    bp = BackProjectionLinear(geom, lut)
+    bp = BackProjectionLinear(geom, lut, trainable_apodization=trainable_apodization)
+    fp = ForwardProjectionLinear(bp)
+    return bp, fp
+
+
+def create_model(cfg: TrainConfig, device: torch.device) -> BPTransformer:
+    """Build BPTransformer (BP + ViT) according to the provided configuration."""
+    bp, _ = build_projection_operators(cfg, device)
     vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
     if cfg.ny % vit.patch != 0 or cfg.nx % vit.patch != 0:
         raise ValueError(
