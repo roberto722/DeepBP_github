@@ -455,8 +455,15 @@ def run_inference_steps(
     cfg: "TrainConfig",
     device: Optional[torch.device] = None,
     normalize: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[torch.Tensor]]:
-    """Return normalized sinogram, BP image, final output and per-step intermediates."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[List[torch.Tensor]]]:
+    """
+    Return normalized sinogram, BP image, final output and the full per-step sequence.
+
+    ``iter_imgs`` always includes the BP image as step 0 and, when available, all
+    subsequent iterations up to the final reconstruction. When a model does not
+    expose intermediate steps the list may contain only the BP and the final
+    prediction (or be ``None`` when unavailable).
+    """
     if device is None:
         device = next(model.parameters()).device
 
@@ -478,11 +485,26 @@ def run_inference_steps(
     with torch.no_grad():
         pred, bp_img, intermediates = model(sino_norm)
 
+    iter_sequence: List[torch.Tensor] = []
+    if bp_img is not None:
+        iter_sequence.append(bp_img)
+
+    if intermediates is not None:
+        if isinstance(intermediates, (list, tuple)):
+            iter_sequence.extend(intermediates)
+        else:
+            iter_sequence.append(intermediates)
+
+    if pred is not None and (not iter_sequence or iter_sequence[-1] is not pred):
+        iter_sequence.append(pred)
+
+    iter_imgs = [step.detach().cpu() for step in iter_sequence] if iter_sequence else None
+
     return (
         sino_norm.detach().cpu(),
         bp_img.detach().cpu(),
         pred.detach().cpu(),
-        [step.detach().cpu() for step in intermediates],
+        iter_imgs,
     )
 
 # ================================
@@ -551,32 +573,60 @@ def ssim(
 # Side-by-side saver
 # ================================
 
-def save_side_by_side(pred: torch.Tensor, gt: torch.Tensor, bp: torch.Tensor,
-                      out_path: str, vmin: Optional[float]=None, vmax: Optional[float]=None):
+def save_side_by_side(
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    bp: torch.Tensor,
+    out_path: str,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    iter_steps: Optional[List[Tuple[int, torch.Tensor]]] = None,
+):
     """
-    Save a side-by-side image [BP | Pred | GT] for quick inspection.
+    Save a side-by-side image [BP | (optional intermediate steps) | Pred | GT].
+
     Expects tensors in shape [1, H, W] and roughly [0,1] range.
     """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    def to_uint8(img):
-        x = img.detach().cpu().clamp(0, 1)
+
+    def to_uint8(img: torch.Tensor) -> Image.Image:
+        x = img.detach().cpu()
+        if x.dim() == 3 and x.shape[0] == 1:
+            x = x[0]
+        elif x.dim() == 4 and x.shape[0] == 1 and x.shape[1] == 1:
+            x = x[0, 0]
+        else:
+            x = x.squeeze()
+
+        x = x.clamp(0, 1)
         if vmin is not None or vmax is not None:
             lo = 0.0 if vmin is None else vmin
             hi = 1.0 if vmax is None else vmax
             x = (x - lo) / max(hi - lo, 1e-6)
             x = x.clamp(0, 1)
-        x = (x * 255.0).round().byte().squeeze(0).numpy()  # [H,W]
+        x = (x * 255.0).round().byte().numpy()  # [H,W]
         return Image.fromarray(x, mode="L")
 
-    bp_img   = to_uint8(bp[0])
-    pred_img = to_uint8(pred[0])
-    gt_img   = to_uint8(gt[0])
+    panels: List[Image.Image] = []
 
-    W = bp_img.width + pred_img.width + gt_img.width
-    H = max(bp_img.height, pred_img.height, gt_img.height)
-    canvas = Image.new("L", (W, H))
+    panels.append(to_uint8(bp))
+
+    if iter_steps:
+        seen = set()
+        for idx, tensor in sorted(iter_steps, key=lambda item: item[0]):
+            if idx in seen:
+                continue
+            seen.add(idx)
+            panels.append(to_uint8(tensor))
+
+    panels.append(to_uint8(pred))
+    panels.append(to_uint8(gt))
+
+    width = sum(im.width for im in panels)
+    height = max(im.height for im in panels)
+    canvas = Image.new("L", (width, height))
     xoff = 0
-    for im in (bp_img, pred_img, gt_img):
+    for im in panels:
         canvas.paste(im, (xoff, 0))
         xoff += im.width
     canvas.save(out_path)
@@ -616,10 +666,19 @@ def build_bright_mask(
     return mask
 
 
-def validate(model: nn.Module, loader: DataLoader, device: torch.device, epoch,
-             save_dir: Optional[str] = None, max_save: int = 8,
-             weight_alpha: float = 0.0, weight_threshold: Optional[float] = None,
-             ssim_mask_threshold: Optional[float] = None, ssim_mask_dilation: int = 0):
+def validate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    epoch,
+    save_dir: Optional[str] = None,
+    max_save: int = 8,
+    intermediate_indices: Optional[List[int]] = None,
+    weight_alpha: float = 0.0,
+    weight_threshold: Optional[float] = None,
+    ssim_mask_threshold: Optional[float] = None,
+    ssim_mask_dilation: int = 0,
+):
     model.eval()
     agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
     compute_masked_ssim = ssim_mask_threshold is not None
@@ -633,6 +692,14 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, epoch,
             img  = img.to(device, non_blocking=True)
 
             pred, bp, intermediates = model(sino)            # forward in FP32
+            iter_sequence: List[torch.Tensor] = [bp]
+            if intermediates is not None:
+                if isinstance(intermediates, (list, tuple)):
+                    iter_sequence.extend(intermediates)
+                else:
+                    iter_sequence.append(intermediates)
+            if pred is not None and (not iter_sequence or iter_sequence[-1] is not pred):
+                iter_sequence.append(pred)
             # Metrics per-sample
             batch_psnr = psnr(pred, img).mean()
             batch_ssim = ssim(pred, img).mean()
@@ -657,7 +724,31 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device, epoch,
             if save_dir is not None and saved < max_save:
                 for b in range(min(bs, max_save - saved)):
                     out_path = os.path.join(save_dir, f"val_epoch_{epoch}_{i:04d}_più corta{b:02d}.png")
-                    save_side_by_side(pred[b], img[b], bp[b], out_path)
+                    debug_steps: Optional[List[Tuple[int, torch.Tensor]]] = None
+                    if intermediate_indices and iter_sequence:
+                        total_steps = len(iter_sequence)
+                        selected: List[Tuple[int, torch.Tensor]] = []
+                        seen_steps = set()
+                        for idx in intermediate_indices:
+                            actual_idx = idx if idx >= 0 else total_steps + idx
+                            if actual_idx < 0 or actual_idx >= total_steps:
+                                continue
+                            if actual_idx in seen_steps:
+                                continue
+                            seen_steps.add(actual_idx)
+                            if actual_idx == 0 or actual_idx == total_steps - 1:
+                                continue
+                            selected.append((actual_idx, iter_sequence[actual_idx][b]))
+                        if selected:
+                            selected.sort(key=lambda item: item[0])
+                            debug_steps = selected
+                    save_side_by_side(
+                        pred[b],
+                        img[b],
+                        bp[b],
+                        out_path,
+                        iter_steps=debug_steps,
+                    )
                     saved += 1
 
     for k in agg:
@@ -780,6 +871,7 @@ class TrainConfig:
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
     save_val_images: bool = True
     max_val_images: int = 2
+    val_intermediate_indices: Optional[List[int]] = None  # steps (0-based, allow negatives) to include when saving val images
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
@@ -916,13 +1008,19 @@ def main():
             weight_alpha=cfg.weight_alpha,
             weight_threshold=cfg.weight_threshold,
         )
-        val = validate(model, val_ld, device, epoch,
-                       save_dir=img_dir if cfg.save_val_images else None,
-                       max_save=cfg.max_val_images,
-                       weight_alpha=cfg.weight_alpha,
-                       weight_threshold=cfg.weight_threshold,
-                       ssim_mask_threshold=cfg.ssim_mask_threshold,
-                       ssim_mask_dilation=cfg.ssim_mask_dilation)
+        val = validate(
+            model,
+            val_ld,
+            device,
+            epoch,
+            save_dir=img_dir if cfg.save_val_images else None,
+            max_save=cfg.max_val_images,
+            intermediate_indices=cfg.val_intermediate_indices,
+            weight_alpha=cfg.weight_alpha,
+            weight_threshold=cfg.weight_threshold,
+            ssim_mask_threshold=cfg.ssim_mask_threshold,
+            ssim_mask_dilation=cfg.ssim_mask_dilation,
+        )
 
         scheduler.step()
 
