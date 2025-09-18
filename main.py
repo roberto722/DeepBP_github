@@ -276,7 +276,10 @@ class ViTRefiner(nn.Module):
         pixels = self.proj_out(z)                  # [B, N, ps*ps]
         ps = self.patch
         pixels = pixels.view(B, Hp, Wp, ps, ps)    # [B, Hp, Wp, ps, ps]
-        img = pixels.permute(0, 3, 4, 1, 2).contiguous().view(B, 1, Hp*ps, Wp*ps)
+        # Keep each grid dimension adjacent to its intra-patch pixels (Hp with ps, Wp with ps)
+        # so that reshaping back to the image plane preserves spatial locality.
+        pixels = pixels.permute(0, 1, 3, 2, 4)    # [B, Hp, ps, Wp, ps]
+        img = pixels.contiguous().view(B, 1, Hp*ps, Wp*ps)
         # Final polishing conv
         img = self.out_conv(img)
         # Residual with input to stabilize training
