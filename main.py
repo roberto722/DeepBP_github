@@ -412,10 +412,23 @@ def save_side_by_side(pred: torch.Tensor, gt: torch.Tensor, bp: torch.Tensor,
 # Training / Validation (FP32 ONLY)
 # ================================
 
+def compute_intensity_weights(img: torch.Tensor, alpha: float, threshold: Optional[float]) -> torch.Tensor:
+    """Build per-pixel weights from the ground-truth intensities."""
+    weights = torch.ones_like(img)
+    if alpha == 0.0:
+        return weights
+    if threshold is None:
+        weights = weights + alpha * img
+    else:
+        weights = weights + alpha * (img > threshold).to(img.dtype)
+    return weights
+
+
 def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epoch,
-             save_dir: Optional[str] = None, max_save: int = 8):
+             save_dir: Optional[str] = None, max_save: int = 8,
+             weight_alpha: float = 0.0, weight_threshold: Optional[float] = None):
     model.eval()
-    agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0}
+    agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
     n = 0
     saved = 0
     with torch.no_grad():  # NOTE: no autocast anywhere (pure FP32)
@@ -428,12 +441,15 @@ def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epo
             batch_psnr = psnr(pred, img).mean()
             batch_ssim = ssim(pred, img).mean()
             batch_l1   = F.l1_loss(pred, img)
+            weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
+            batch_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
             bs = sino.size(0)
             n += bs
             agg['psnr'] += batch_psnr.item() * bs
             agg['ssim'] += batch_ssim.item() * bs
             agg['l1']   += batch_l1.item() * bs
+            agg['weighted_l1'] += batch_weighted_l1.item() * bs
 
             # Save a few side-by-side for inspection
             if save_dir is not None and saved < max_save:
@@ -446,19 +462,23 @@ def validate(model: BPTransformer, loader: DataLoader, device: torch.device, epo
         agg[k] /= max(n, 1)
     return agg
 
-def train_one_epoch(model: BPTransformer, loader: DataLoader, optimizer, device: torch.device, clip_grad: float = 1.0):
+
+def train_one_epoch(model: BPTransformer, loader: DataLoader, optimizer, device: torch.device,
+                    clip_grad: float = 1.0, weight_alpha: float = 0.0,
+                    weight_threshold: Optional[float] = None):
     model.train()
-    agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0}
+    agg = {'psnr': 0.0, 'ssim': 0.0, 'l1': 0.0, 'weighted_l1': 0.0}
     n = 0
     for i, (sino, img) in enumerate(loader):
         sino = sino.to(device, non_blocking=True)
         img  = img.to(device, non_blocking=True)
 
         pred, _ = model(sino)                     # forward in FP32
-        loss_l1 = F.l1_loss(pred, img)
+        weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
+        loss_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
         optimizer.zero_grad(set_to_none=True)
-        loss_l1.backward()                        # backprop in FP32
+        loss_weighted_l1.backward()               # backprop in FP32
         if clip_grad is not None and clip_grad > 0:
             torch.nn.utils.clip_grad_norm_(model.vit.parameters(), clip_grad)
         optimizer.step()
@@ -467,7 +487,8 @@ def train_one_epoch(model: BPTransformer, loader: DataLoader, optimizer, device:
         with torch.no_grad():
             bs = sino.size(0)
             n += bs
-            agg['l1']   += loss_l1.item() * bs
+            agg['weighted_l1'] += loss_weighted_l1.item() * bs
+            agg['l1']   += F.l1_loss(pred, img).item() * bs
             agg['psnr'] += psnr(pred, img).mean().item() * bs
             agg['ssim'] += ssim(pred, img).mean().item() * bs
 
@@ -528,6 +549,8 @@ class TrainConfig:
     lr: float = 2e-4
     num_workers: int = 4
     clip_grad: float = 1.0
+    weight_alpha: float = 1.0
+    weight_threshold: Optional[float] = 0.5
 
     # --- Global scaling (per-domain) ---
     # If any of these is None, stats will be computed from the training set.
@@ -629,17 +652,29 @@ def main():
     # Training loop (STRICT FP32: no autocast)
     best_psnr = -1.0
     for epoch in range(1, cfg.epochs + 1):
-        tr = train_one_epoch(model, train_ld, optimizer, device, clip_grad=cfg.clip_grad)
+        tr = train_one_epoch(
+            model,
+            train_ld,
+            optimizer,
+            device,
+            clip_grad=cfg.clip_grad,
+            weight_alpha=cfg.weight_alpha,
+            weight_threshold=cfg.weight_threshold,
+        )
         val = validate(model, val_ld, device, epoch,
                        save_dir=img_dir if cfg.save_val_images else None,
-                       max_save=cfg.max_val_images)
+                       max_save=cfg.max_val_images,
+                       weight_alpha=cfg.weight_alpha,
+                       weight_threshold=cfg.weight_threshold)
 
         scheduler.step()
 
         log = {
             "epoch": epoch,
             "train_psnr": tr["psnr"], "train_ssim": tr["ssim"], "train_l1": tr["l1"],
+            "train_weighted_l1": tr["weighted_l1"],
             "val_psnr": val["psnr"],   "val_ssim":  val["ssim"],  "val_l1":  val["l1"],
+            "val_weighted_l1": val["weighted_l1"],
             "lr": scheduler.get_last_lr()[0]
         }
         print(json.dumps(log, indent=2))
