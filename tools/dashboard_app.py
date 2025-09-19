@@ -1,4 +1,4 @@
-"""Streamlit dashboard per esplorare il modello BPTransformer."""
+"""Streamlit dashboard per esplorare il modello DelayAndSumTransformer."""
 import os
 import sys
 import tempfile
@@ -51,8 +51,8 @@ def plot_outputs(images: List[Tuple[str, np.ndarray]], sinogram: bool = False):
 
 
 def main():
-    st.set_page_config(page_title="BPTransformer Dashboard", layout="wide")
-    st.title("Dashboard BPTransformer")
+    st.set_page_config(page_title="DelayAndSumTransformer Dashboard", layout="wide")
+    st.title("Dashboard DelayAndSumTransformer")
 
     cfg = TrainConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -125,7 +125,7 @@ def main():
                 require_target=False,
             )
 
-            sino_norm, bp_img, pred_img, iter_imgs = run_inference_steps(
+            sino_norm, das_img, pred_img, iter_imgs = run_inference_steps(
                 model,
                 sinogram_raw,
                 cfg,
@@ -134,12 +134,12 @@ def main():
             )
 
             sino_plot = tensor_to_numpy(sino_norm[0])
-            bp_plot = tensor_to_numpy(bp_img[0])
+            das_plot = tensor_to_numpy(das_img[0])
             pred_plot = tensor_to_numpy(pred_img[0])
 
             images = [
                 ("Sinogramma normalizzato", sino_plot),
-                ("BackProjection", bp_plot),
+                ("Delay-and-Sum", das_plot),
                 ("Predizione ViTRefiner", pred_plot),
             ]
 
@@ -160,7 +160,7 @@ def main():
                     sample_tensor = step_tensor[0] if step_tensor.dim() > 0 else step_tensor
                     iter_arrays.append(tensor_to_numpy(sample_tensor))
                     if idx == 0:
-                        label = f"Step {idx} (BP)"
+                        label = f"Step {idx} (DAS)"
                     elif idx == total_steps - 1:
                         label = f"Step {idx} (finale)"
                     else:
