@@ -885,7 +885,7 @@ class TrainConfig:
     ssim_mask_dilation: int = 0
 
     # Model variants
-    model_variant: str = "baseline"
+    model_variant: str = "unrolled"
     unroll_steps: int = 5
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = False
