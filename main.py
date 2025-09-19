@@ -4,8 +4,12 @@ import os
 import json
 import random
 import shutil
+<<<<<<< Updated upstream
 import warnings
 from dataclasses import dataclass
+=======
+from dataclasses import dataclass, field
+>>>>>>> Stashed changes
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -1056,7 +1060,7 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 5
+    unroll_steps: int = 7
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = False
 
@@ -1073,8 +1077,8 @@ class TrainConfig:
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
     save_val_images: bool = True
-    max_val_images: int = 2
-    val_intermediate_indices: Optional[List[int]] = None  # steps (0-based, allow negatives) to include when saving val images
+    max_val_images: int = 1
+    val_intermediate_indices: Optional[List[int]] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5])  # steps (0-based, allow negatives) to include when saving val images
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
