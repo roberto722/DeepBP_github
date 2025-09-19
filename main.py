@@ -68,12 +68,13 @@ class LinearProbeGeom:
         return np.full((self.n_det,), self.array_y_m, dtype=np.float32)
 
 # ================================
-# Back-Projection LUT builder
+# Delay-and-Sum LUT builder
 # ================================
 
-def build_backproj_lut(geom: LinearProbeGeom, device: torch.device) -> torch.Tensor:
+def build_delay_and_sum_lut(geom: LinearProbeGeom, device: torch.device) -> torch.Tensor:
     """
-    Precompute the (ny, nx, n_det, 2) LUT of (t_idx_floor, alpha) for linear interpolation over time.
+    Precompute the (ny, nx, n_det, 2) LUT of (t_idx_floor, alpha) for linear interpolation over time
+    used by the Delay-and-Sum (DAS) beamformer.
     - t_idx_floor: integer index of the left temporal sample
     - alpha: fractional part for linear interpolation: s(t0+alpha*dt) between floor and floor+1
     Notes:
@@ -113,15 +114,15 @@ def build_backproj_lut(geom: LinearProbeGeom, device: torch.device) -> torch.Ten
     return lut_t
 
 
-class BackProjectionLinear(nn.Module):
+class DelayAndSumLinear(nn.Module):
     """
-    Differentiable DAS Back-Projection using a precomputed LUT for a linear array.
+    Differentiable Delay-and-Sum beamformer using a precomputed LUT for a linear array.
     Input:  sinogram S with shape [B, 1, n_det, n_t]
     Output: image I with shape [B, 1, ny, nx]
     Notes:
       * We linearly interpolate along the temporal dimension using (floor, alpha).
       * Out-of-range temporal indices are masked to zero contribution.
-      * Summation over detectors approximates DAS (unweighted). You can add apodization later.
+      * Summation over detectors approximates classical DAS (unweighted). You can add apodization later.
     """
     def __init__(
         self,
@@ -229,20 +230,20 @@ class BackProjectionLinear(nn.Module):
 class ForwardProjectionLinear(nn.Module):
     """
     Differentiable forward projection that reuses the LUT/apodization from
-    :class:`BackProjectionLinear` for a linear array acquisition geometry.
+    :class:`DelayAndSumLinear` for a linear array acquisition geometry.
     Input:  image I with shape [B, 1, ny, nx]
     Output: sinogram S with shape [B, 1, n_det, n_t]
     """
 
-    def __init__(self, backproj: BackProjectionLinear):
+    def __init__(self, das: DelayAndSumLinear):
         super().__init__()
-        self.geom = backproj.geom
+        self.geom = das.geom
         # Keep an internal reference without registering the module twice
-        object.__setattr__(self, "_backproj", backproj)
+        object.__setattr__(self, "_das", das)
 
     @property
-    def backproj(self) -> BackProjectionLinear:
-        return self._backproj
+    def das(self) -> DelayAndSumLinear:
+        return self._das
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         """
@@ -253,19 +254,19 @@ class ForwardProjectionLinear(nn.Module):
         assert C == 1, "Expect image with a single channel."
         assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
 
-        k0 = self.backproj.k0
+        k0 = self.das.k0
         if k0.device != img.device:
             k0 = k0.to(device=img.device)
         k1 = k0 + 1
-        alpha = self.backproj.alpha.to(device=img.device, dtype=img.dtype)
-        valid = self.backproj.valid
+        alpha = self.das.alpha.to(device=img.device, dtype=img.dtype)
+        valid = self.das.valid
         if valid.device != img.device:
             valid = valid.to(device=img.device)
 
         img_flat = img[:, 0, :, :].reshape(B, -1)  # [B, ny*nx]
         sino = torch.zeros((B, self.geom.n_det, self.geom.n_t), device=img.device, dtype=img.dtype)
 
-        apod = self.backproj.get_apodization(img.dtype, img.device)
+        apod = self.das.get_apodization(img.dtype, img.device)
 
         for d in range(self.geom.n_det):
             k0_d = k0[..., d].reshape(-1)
@@ -403,7 +404,7 @@ class LocalFusionBlock(nn.Module):
 
 class ViTRefiner(nn.Module):
     """
-    Simple ViT-like refiner that denoises/refines the BP image.
+    Simple ViT-like refiner that denoises/refines the Delay-and-Sum (DAS) image.
     Input:  [B, 1, H, W]
     Output: [B, 1, H, W]
     """
@@ -555,40 +556,40 @@ def adapt_vitrefiner_state_dict(state_dict: dict) -> Tuple[dict, bool]:
 
 
 # ================================
-# Full Model: BP (fixed) + Transformer (trainable)
+# Full Model: Delay-and-Sum (fixed) + Transformer (trainable)
 # ================================
 
-class BPTransformer(nn.Module):
-    def __init__(self, bp: BackProjectionLinear, vit: ViTRefiner, freeze_bp: bool = True):
+class DelayAndSumTransformer(nn.Module):
+    def __init__(self, das: DelayAndSumLinear, vit: ViTRefiner, freeze_das: bool = True):
         super().__init__()
-        self.bp = bp
+        self.das = das
         self.vit = vit
-        if freeze_bp:
-            for p in self.bp.parameters():
+        if freeze_das:
+            for p in self.das.parameters():
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        bp_img = self.bp(sino)     # [B, 1, H, W]
-        out = self.vit(bp_img)     # [B, 1, H, W]
+        das_img = self.das(sino)   # [B, 1, H, W]
+        out = self.vit(das_img)    # [B, 1, H, W]
         intermediates = [out]
-        return out, bp_img, intermediates
+        return out, das_img, intermediates
 
 
-class UnrolledBPTransformer(nn.Module):
+class UnrolledDelayAndSumTransformer(nn.Module):
     def __init__(
         self,
-        bp_module: BackProjectionLinear,
+        das_module: DelayAndSumLinear,
         forward_module: ForwardProjectionLinear,
         vit_module: ViTRefiner,
         num_steps: int,
         data_consistency_weight: float = 1.0,
         learnable_data_consistency_weight: bool = False,
-        freeze_bp: bool = False,
+        freeze_das: bool = False,
     ):
         super().__init__()
         if num_steps < 1:
-            raise ValueError("num_steps must be >= 1 for UnrolledBPTransformer")
-        self.bp = bp_module
+            raise ValueError("num_steps must be >= 1 for UnrolledDelayAndSumTransformer")
+        self.das = das_module
         self.forward_projector = forward_module
         self.vit = vit_module
         self.num_steps = int(num_steps)
@@ -597,12 +598,12 @@ class UnrolledBPTransformer(nn.Module):
             self.data_consistency_weight = nn.Parameter(weight)
         else:
             self.register_buffer("data_consistency_weight", weight)
-        if freeze_bp:
-            for p in self.bp.parameters():
+        if freeze_das:
+            for p in self.das.parameters():
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        x0 = self.bp(sino)
+        x0 = self.das(sino)
         xi = x0
         intermediates: List[torch.Tensor] = []
 
@@ -611,7 +612,7 @@ class UnrolledBPTransformer(nn.Module):
         for _ in range(self.num_steps):
             sino_est = self.forward_projector(xi)
             sino_residual = sino - sino_est
-            correction = self.bp(sino_residual)
+            correction = self.das(sino_residual)
             xi = xi + weight * correction
             xi = self.vit(xi)
             intermediates.append(xi)
@@ -627,11 +628,12 @@ def run_inference_steps(
     normalize: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[List[torch.Tensor]]]:
     """
-    Return normalized sinogram, BP image, final output and the full per-step sequence.
+    Return normalized sinogram, Delay-and-Sum (DAS) image, final output and the full per-step
+    sequence.
 
-    ``iter_imgs`` always includes the BP image as step 0 and, when available, all
+    ``iter_imgs`` always includes the DAS image as step 0 and, when available, all
     subsequent iterations up to the final reconstruction. When a model does not
-    expose intermediate steps the list may contain only the BP and the final
+    expose intermediate steps the list may contain only the DAS result and the final
     prediction (or be ``None`` when unavailable).
     """
     if device is None:
@@ -653,11 +655,11 @@ def run_inference_steps(
 
     model.eval()
     with torch.no_grad():
-        pred, bp_img, intermediates = model(sino_norm)
+        pred, das_img, intermediates = model(sino_norm)
 
     iter_sequence: List[torch.Tensor] = []
-    if bp_img is not None:
-        iter_sequence.append(bp_img)
+    if das_img is not None:
+        iter_sequence.append(das_img)
 
     if intermediates is not None:
         if isinstance(intermediates, (list, tuple)):
@@ -672,7 +674,7 @@ def run_inference_steps(
 
     return (
         sino_norm.detach().cpu(),
-        bp_img.detach().cpu(),
+        das_img.detach().cpu(),
         pred.detach().cpu(),
         iter_imgs,
     )
@@ -746,14 +748,14 @@ def ssim(
 def save_side_by_side(
     pred: torch.Tensor,
     gt: torch.Tensor,
-    bp: torch.Tensor,
+    das: torch.Tensor,
     out_path: str,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     iter_steps: Optional[List[Tuple[int, torch.Tensor]]] = None,
 ):
     """
-    Save a side-by-side image [BP | (optional intermediate steps) | Pred | GT].
+    Save a side-by-side image [DAS | (optional intermediate steps) | Pred | GT].
 
     Expects tensors in shape [1, H, W] and roughly [0,1] range.
     """
@@ -779,7 +781,7 @@ def save_side_by_side(
 
     panels: List[Image.Image] = []
 
-    panels.append(to_uint8(bp))
+    panels.append(to_uint8(das))
 
     if iter_steps:
         seen = set()
@@ -864,8 +866,8 @@ def validate(
             sino = sino.to(device, non_blocking=True)
             img  = img.to(device, non_blocking=True)
 
-            pred, bp, intermediates = model(sino)            # forward in FP32
-            iter_sequence: List[torch.Tensor] = [bp]
+            pred, das, intermediates = model(sino)           # forward in FP32
+            iter_sequence: List[torch.Tensor] = [das]
             if intermediates is not None:
                 if isinstance(intermediates, (list, tuple)):
                     iter_sequence.extend(intermediates)
@@ -930,7 +932,7 @@ def validate(
                     save_side_by_side(
                         pred[b],
                         img[b],
-                        bp[b],
+                        das[b],
                         out_path,
                         iter_steps=debug_steps,
                     )
@@ -956,7 +958,7 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, device: tor
         sino = sino.to(device, non_blocking=True)
         img  = img.to(device, non_blocking=True)
 
-        pred, bp_img, intermediates = model(sino)                     # forward in FP32
+        pred, das_img, intermediates = model(sino)                    # forward in FP32
         weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
         loss_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
@@ -1071,7 +1073,7 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/bp_transformer_fp32"
+    work_dir: str = "./runs/das_transformer_fp32"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
@@ -1094,18 +1096,18 @@ def build_projection_operators(
     cfg: TrainConfig,
     device: torch.device,
     trainable_apodization: bool = False,
-) -> Tuple[BackProjectionLinear, ForwardProjectionLinear]:
-    """Construct back- and forward-projection operators sharing the same LUT."""
+) -> Tuple[DelayAndSumLinear, ForwardProjectionLinear]:
+    """Construct Delay-and-Sum and forward-projection operators sharing the same LUT."""
     geom = build_geometry(cfg)
-    lut = build_backproj_lut(geom, device=device)
-    bp = BackProjectionLinear(geom, lut, trainable_apodization=trainable_apodization)
-    fp = ForwardProjectionLinear(bp)
-    return bp, fp
+    lut = build_delay_and_sum_lut(geom, device=device)
+    das = DelayAndSumLinear(geom, lut, trainable_apodization=trainable_apodization)
+    fp = ForwardProjectionLinear(das)
+    return das, fp
 
 
 def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
-    """Build BPTransformer (BP + ViT) according to the provided configuration."""
-    bp, fp = build_projection_operators(
+    """Build DelayAndSumTransformer (DAS + ViT) according to the provided configuration."""
+    das, fp = build_projection_operators(
         cfg,
         device,
         trainable_apodization=cfg.trainable_apodization,
@@ -1135,22 +1137,27 @@ def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
             f"Got (ny={cfg.ny}, nx={cfg.nx}), patch={vit.patch_size}, stride={vit.stride_size}."
         )
     vit._build_pos_embed(cfg.ny, cfg.nx, vit.embed_dim, device, dtype=torch.float32)
-    freeze_bp = not cfg.trainable_apodization
+    freeze_das = not cfg.trainable_apodization
     variant = cfg.model_variant.lower()
     if variant == "unrolled":
         if cfg.unroll_steps < 1:
             raise ValueError("TrainConfig.unroll_steps must be >= 1 for the unrolled variant")
-        model = UnrolledBPTransformer(
-            bp,
+        model = UnrolledDelayAndSumTransformer(
+            das,
             fp,
             vit,
             num_steps=cfg.unroll_steps,
             data_consistency_weight=cfg.data_consistency_weight,
             learnable_data_consistency_weight=cfg.learnable_data_consistency_weight,
-            freeze_bp=freeze_bp,
+            freeze_das=freeze_das,
         )
-    elif variant in {"baseline", "bp_transformer"}:
-        model = BPTransformer(bp, vit, freeze_bp=freeze_bp)
+    elif variant in {"baseline", "das_transformer", "bp_transformer"}:
+        if variant == "bp_transformer":
+            warnings.warn(
+                "TrainConfig.model_variant='bp_transformer' is deprecated; use 'das_transformer' instead.",
+                DeprecationWarning,
+            )
+        model = DelayAndSumTransformer(das, vit, freeze_das=freeze_das)
     else:
         raise ValueError(f"Unknown model variant '{cfg.model_variant}'.")
     model = model.to(device)
@@ -1204,7 +1211,7 @@ def main():
     img_dir = os.path.join(cfg.work_dir, "val_images")
     os.makedirs(img_dir, exist_ok=True)
 
-    # Build model (BP module + ViT)
+    # Build model (DAS module + ViT)
     model = create_model(cfg, device)
 
     # Optimizer (train all parameters requiring gradients)
