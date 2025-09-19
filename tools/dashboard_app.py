@@ -140,7 +140,7 @@ def main():
             images = [
                 ("Sinogramma normalizzato", sino_plot),
                 ("BackProjection", bp_plot),
-                ("Predizione ViT", pred_plot),
+                ("Predizione ViTRefiner", pred_plot),
             ]
 
             if target is not None:

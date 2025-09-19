@@ -4,6 +4,7 @@ import os
 import json
 import random
 import shutil
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -357,6 +358,49 @@ class TransformerEncoder(nn.Module):
             x = x + self.drop(y)
         return x
 
+
+class PatchDecoder(nn.Module):
+    """Decode token features on the patch grid with local convolutions."""
+
+    def __init__(self, embed_dim: int, patch_area: int, num_blocks: int = 3):
+        super().__init__()
+        if num_blocks < 1:
+            raise ValueError("PatchDecoder requires at least one convolutional block")
+
+        layers: List[nn.Module] = []
+        for _ in range(num_blocks):
+            layers.append(nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1))
+            layers.append(nn.GELU())
+        self.layers = nn.Sequential(*layers)
+        self.proj = nn.Conv2d(embed_dim, patch_area, kernel_size=3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.layers(x)
+        x = x + residual
+        x = self.proj(x)
+        return x
+
+
+class LocalFusionBlock(nn.Module):
+    """Fuse overlapping patches on the full-resolution image with local smoothing."""
+
+    def __init__(self, in_channels: int, hidden_channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1)
+        self.act = nn.GELU()
+        self.conv2 = nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1)
+        nn.init.zeros_(self.conv2.weight)
+        if self.conv2.bias is not None:
+            nn.init.zeros_(self.conv2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv1(x)
+        out = self.act(out)
+        out = self.conv2(out)
+        return x + out
+
+
 class ViTRefiner(nn.Module):
     """
     Simple ViT-like refiner that denoises/refines the BP image.
@@ -385,9 +429,10 @@ class ViTRefiner(nn.Module):
         self.pos_embed: Optional[nn.Parameter] = None  # created on first forward
         self.grid_size: Optional[Tuple[int, int]] = None
         self.encoder = TransformerEncoder(embed_dim, depth, heads, mlp_ratio, p_drop)
-        patch_area = self.patch_size[0] * self.patch_size[1]
-        self.proj_out = nn.Linear(embed_dim, patch_area)  # predict patch pixels
-        self.out_conv = nn.Conv2d(1, 1, kernel_size=3, padding=1)  # small conv polish
+        self.patch_area = self.patch_size[0] * self.patch_size[1]
+        self.token_decoder = PatchDecoder(embed_dim, self.patch_area, num_blocks=3)
+        fusion_hidden = max(embed_dim // 8, 16)
+        self.local_fusion = LocalFusionBlock(in_channels=1, hidden_channels=fusion_hidden)
         self.register_buffer("fold_weight", torch.empty(0), persistent=False)
         self._fold_weight_shape: Optional[Tuple[int, int]] = None
         self._fold_weight_stride: Optional[Tuple[int, int]] = None
@@ -457,9 +502,9 @@ class ViTRefiner(nn.Module):
             self._build_pos_embed(H, W, D, x.device, dtype=z.dtype)
         z = z + self.pos_embed
         z = self.encoder(z)                        # [B, N, D]
-        pixels = self.proj_out(z)                  # [B, N, patch_area]
-        patch_area = self.patch_size[0] * self.patch_size[1]
-        pixels = pixels.transpose(1, 2).reshape(B, patch_area, Hp * Wp)
+        z = z.transpose(1, 2).reshape(B, D, Hp, Wp)
+        pixels = self.token_decoder(z)             # [B, patch_area, Hp, Wp]
+        pixels = pixels.reshape(B, self.patch_area, Hp * Wp)
         img = F.fold(
             pixels,
             output_size=(H, W),
@@ -468,10 +513,43 @@ class ViTRefiner(nn.Module):
         )
         norm = self._get_fold_weight((H, W), stride_hw, x.device, x.dtype)
         img = img / norm.clamp_min(1.0)
-        img = self.out_conv(img)
+        img = self.local_fusion(img)
         if img.shape == x.shape:
             img = img + x
         return img
+
+
+def adapt_vitrefiner_state_dict(state_dict: dict) -> Tuple[dict, bool]:
+    """Upgrade legacy ViTRefiner checkpoints to the new convolutional decoder."""
+
+    new_state = dict(state_dict)
+    converted = False
+
+    suffix_weight = "proj_out.weight"
+    suffix_bias = "proj_out.bias"
+
+    for key in list(state_dict.keys()):
+        if key.endswith(suffix_weight):
+            prefix = key[: -len(suffix_weight)]
+            bias_key = prefix + suffix_bias
+            weight = new_state.pop(key)
+            bias = new_state.pop(bias_key, None)
+
+            conv_weight = weight.new_zeros((weight.shape[0], weight.shape[1], 3, 3))
+            conv_weight[:, :, 1, 1] = weight
+
+            new_state[prefix + "token_decoder.proj.weight"] = conv_weight
+            if bias is not None:
+                new_state[prefix + "token_decoder.proj.bias"] = bias
+            else:
+                new_state[prefix + "token_decoder.proj.bias"] = weight.new_zeros(weight.shape[0])
+            converted = True
+        elif key.endswith("out_conv.weight") or key.endswith("out_conv.bias"):
+            new_state.pop(key)
+            converted = True
+
+    return new_state, converted
+
 
 # ================================
 # Full Model: BP (fixed) + Transformer (trainable)
@@ -1092,7 +1170,21 @@ def load_checkpoint(
 
     payload = torch.load(ckpt_path, map_location=map_location)
     state_dict = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
-    model.load_state_dict(state_dict)
+    upgraded_state, converted = adapt_vitrefiner_state_dict(state_dict)
+    if converted:
+        missing, unexpected = model.load_state_dict(upgraded_state, strict=False)
+        if unexpected:
+            warnings.warn(
+                f"Ignoring unexpected keys when loading checkpoint '{checkpoint}': {unexpected}",
+                RuntimeWarning,
+            )
+        if missing:
+            warnings.warn(
+                f"Missing keys when loading checkpoint '{checkpoint}': {missing}",
+                RuntimeWarning,
+            )
+    else:
+        model.load_state_dict(upgraded_state)
     model.eval()
     return payload
 
