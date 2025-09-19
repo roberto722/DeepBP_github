@@ -472,7 +472,10 @@ class ViTRefiner(nn.Module):
             weight = F.fold(
                 F.unfold(ones, kernel_size=self.patch_size, stride=stride),
                 output_size=shape,
+                kernel_size=self.patch_size,
+                stride=stride,
             )
+            weight = weight.to(device=device, dtype=dtype)
             self.fold_weight = weight
             self._fold_weight_shape = shape
             self._fold_weight_stride = stride
