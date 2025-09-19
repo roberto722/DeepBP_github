@@ -58,8 +58,43 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     st.sidebar.write(f"Dispositivo: {device}")
 
+    default_work_dir = Path(cfg.work_dir).resolve()
+    parent_work_dir = default_work_dir.parent
+    run_directories: List[Path] = []
+    if parent_work_dir.is_dir():
+        run_directories = sorted(d for d in parent_work_dir.iterdir() if d.is_dir())
+    else:
+        st.sidebar.warning(
+            f"Cartella degli esperimenti non trovata: {parent_work_dir}."
+        )
+
+    selected_run_path = default_work_dir
+    if run_directories:
+        run_names = [d.name for d in run_directories]
+        default_index = run_names.index(default_work_dir.name) if default_work_dir.name in run_names else 0
+        selected_run_name = st.sidebar.selectbox(
+            "Esperimento",
+            run_names,
+            index=default_index if run_names else 0,
+        )
+        selected_run_path = parent_work_dir / selected_run_name
+    else:
+        st.sidebar.info(
+            "Nessun esperimento trovato nella cartella padre."
+        )
+
+    cfg.work_dir = str(selected_run_path.resolve())
     work_dir = cfg.work_dir
-    ckpts = [name for name in ("best.pt", "last.pt") if os.path.exists(os.path.join(work_dir, name))]
+    st.sidebar.caption(f"Cartella esperimento: {work_dir}")
+
+    ckpt_dir = Path(work_dir)
+    ckpt_names: List[str] = []
+    if ckpt_dir.is_dir():
+        ckpt_paths = sorted(p for p in ckpt_dir.glob("*.pt") if p.is_file())
+        ckpt_names = [p.name for p in ckpt_paths]
+    ckpts_priority = [name for name in ("best.pt", "last.pt") if name in ckpt_names]
+    remaining_ckpts = sorted(name for name in ckpt_names if name not in ckpts_priority)
+    ckpts = ckpts_priority + remaining_ckpts
 
     model = create_model(cfg, device)
     selected_ckpt: Optional[str] = None
@@ -73,7 +108,8 @@ def main():
                 st.sidebar.error(str(exc))
     else:
         st.sidebar.warning(
-            "Nessun checkpoint trovato. Verranno usati pesi random inizializzati."
+            "Nessun checkpoint trovato nella cartella selezionata. "
+            "Verranno usati pesi random inizializzati."
         )
 
     input_root = os.path.join(cfg.data_root, cfg.sino_dir)
