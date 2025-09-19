@@ -13,6 +13,7 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.modules.utils import _pair
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from dataset import HDF5Dataset, minmax_scale
@@ -294,17 +295,34 @@ class ForwardProjectionLinear(nn.Module):
 
 class PatchEmbed(nn.Module):
     """Image to patch embedding."""
-    def __init__(self, in_ch=1, embed_dim=256, patch=16):
+
+    def __init__(self, in_ch=1, embed_dim=256, patch=16, stride=None):
         super().__init__()
         self.patch = patch
-        self.proj = nn.Conv2d(in_ch, embed_dim, kernel_size=patch, stride=patch)
+        self.patch_size = _pair(patch)
+        self.stride = patch if stride is None else stride
+        self.stride_size = _pair(self.stride)
+        self.proj = nn.Conv2d(
+            in_ch,
+            embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.stride_size,
+        )
+
+    def compute_grid_size(self, H: int, W: int) -> Tuple[int, int]:
+        ph, pw = self.patch_size
+        sh, sw = self.stride_size
+        Hp = max((H - ph) // sh + 1, 0)
+        Wp = max((W - pw) // sw + 1, 0)
+        return Hp, Wp
 
     def forward(self, x):
         # x: [B, C, H, W] -> [B, N, D]
-        x = self.proj(x)                          # [B, D, H/ps, W/ps]
+        B, C, H, W = x.shape
+        x = self.proj(x)
         B, D, Hp, Wp = x.shape
         x = x.flatten(2).transpose(1, 2)          # [B, N, D]
-        return x, (Hp, Wp)
+        return x, (Hp, Wp), (H, W), self.stride_size
 
 class TransformerEncoder(nn.Module):
     """A small stack of standard Transformer encoder blocks."""
@@ -345,42 +363,112 @@ class ViTRefiner(nn.Module):
     Input:  [B, 1, H, W]
     Output: [B, 1, H, W]
     """
-    def __init__(self, in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1):
+
+    def __init__(
+        self,
+        in_ch=1,
+        embed_dim=256,
+        patch=16,
+        stride=None,
+        depth=6,
+        heads=8,
+        mlp_ratio=4.0,
+        p_drop=0.1,
+    ):
         super().__init__()
         self.patch = patch
-        self.embed = PatchEmbed(in_ch, embed_dim, patch)
+        self.stride = patch if stride is None else stride
+        self.patch_size = _pair(self.patch)
+        self.stride_size = _pair(self.stride)
+        self.embed = PatchEmbed(in_ch, embed_dim, patch, stride=self.stride)
         self.embed_dim = embed_dim
-        self.pos_embed = None  # created on first forward based on (Hp, Wp)
+        self.pos_embed: Optional[nn.Parameter] = None  # created on first forward
+        self.grid_size: Optional[Tuple[int, int]] = None
         self.encoder = TransformerEncoder(embed_dim, depth, heads, mlp_ratio, p_drop)
-        self.proj_out = nn.Linear(embed_dim, patch*patch)  # predict patch pixels
+        patch_area = self.patch_size[0] * self.patch_size[1]
+        self.proj_out = nn.Linear(embed_dim, patch_area)  # predict patch pixels
         self.out_conv = nn.Conv2d(1, 1, kernel_size=3, padding=1)  # small conv polish
+        self.register_buffer("fold_weight", torch.empty(0), persistent=False)
+        self._fold_weight_shape: Optional[Tuple[int, int]] = None
+        self._fold_weight_stride: Optional[Tuple[int, int]] = None
 
-    def _build_pos_embed(self, Hp, Wp, dim, device):
-        pe = torch.zeros(1, Hp*Wp, dim, device=device)
-        # Simple learned positional embedding
+    def _compute_grid_size(self, H: int, W: int) -> Tuple[int, int]:
+        return self.embed.compute_grid_size(H, W)
+
+    def _build_pos_embed(
+        self,
+        H: int,
+        W: int,
+        dim: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        Hp, Wp = self._compute_grid_size(H, W)
+        pe = torch.zeros(1, Hp * Wp, dim, device=device, dtype=dtype)
         pe = nn.Parameter(pe)
         nn.init.trunc_normal_(pe, std=0.02)
         self.pos_embed = pe
+        self.grid_size = (Hp, Wp)
+
+    def _get_fold_weight(
+        self,
+        shape: Tuple[int, int],
+        stride: Tuple[int, int],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        weight = self.fold_weight
+        if (
+            weight.numel() == 0
+            or self._fold_weight_shape != shape
+            or self._fold_weight_stride != stride
+        ):
+            ones = torch.ones(1, 1, shape[0], shape[1], device=device, dtype=dtype)
+            weight = F.fold(
+                F.unfold(ones, kernel_size=self.patch_size, stride=stride),
+                output_size=shape,
+            )
+            self.fold_weight = weight
+            self._fold_weight_shape = shape
+            self._fold_weight_stride = stride
+        elif weight.device != device or weight.dtype != dtype:
+            weight = weight.to(device=device, dtype=dtype)
+            self.fold_weight = weight
+        return weight
 
     def forward(self, x):
         # x: [B, 1, H, W]
-        z, (Hp, Wp) = self.embed(x)               # z: [B, N, D]
+        z, (Hp, Wp), (H, W), stride = self.embed(x)  # z: [B, N, D]
+        stride_hw = tuple(stride)
+        expected_grid = self._compute_grid_size(H, W)
+        if expected_grid != (Hp, Wp):
+            Hp, Wp = expected_grid
         B, N, D = z.shape
-        if self.pos_embed is None or self.pos_embed.shape[1] != N or self.pos_embed.shape[2] != D:
-            self._build_pos_embed(Hp, Wp, D, x.device)
+        if Hp * Wp != N:
+            raise ValueError(
+                f"Token count ({N}) does not match grid size ({Hp}x{Wp})."
+            )
+        if (
+            self.pos_embed is None
+            or self.pos_embed.shape[1] != N
+            or self.pos_embed.shape[2] != D
+            or self.grid_size != (Hp, Wp)
+        ):
+            self._build_pos_embed(H, W, D, x.device, dtype=z.dtype)
         z = z + self.pos_embed
         z = self.encoder(z)                        # [B, N, D]
-        # Project tokens back to pixel patches
-        pixels = self.proj_out(z)                  # [B, N, ps*ps]
-        ps = self.patch
-        pixels = pixels.view(B, Hp, Wp, ps, ps)    # [B, Hp, Wp, ps, ps]
-        # Keep each grid dimension adjacent to its intra-patch pixels (Hp with ps, Wp with ps)
-        # so that reshaping back to the image plane preserves spatial locality.
-        pixels = pixels.permute(0, 1, 3, 2, 4)    # [B, Hp, ps, Wp, ps]
-        img = pixels.contiguous().view(B, 1, Hp*ps, Wp*ps)
-        # Final polishing conv
+        pixels = self.proj_out(z)                  # [B, N, patch_area]
+        patch_area = self.patch_size[0] * self.patch_size[1]
+        pixels = pixels.transpose(1, 2).reshape(B, patch_area, Hp * Wp)
+        img = F.fold(
+            pixels,
+            output_size=(H, W),
+            kernel_size=self.patch_size,
+            stride=stride_hw,
+        )
+        norm = self._get_fold_weight((H, W), stride_hw, x.device, x.dtype)
+        img = img / norm.clamp_min(1.0)
         img = self.out_conv(img)
-        # Residual with input to stabilize training
         if img.shape == x.shape:
             img = img + x
         return img
@@ -872,6 +960,10 @@ class TrainConfig:
     wavelength: int = 800
     trainable_apodization: bool = False
 
+    # ViT refiner
+    vit_patch: int = 16
+    vit_stride: Optional[int] = None
+
     # Training
     epochs: int = 50
     batch_size: int = 4
@@ -937,12 +1029,31 @@ def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
         device,
         trainable_apodization=cfg.trainable_apodization,
     )
-    vit = ViTRefiner(in_ch=1, embed_dim=256, patch=16, depth=6, heads=8, mlp_ratio=4.0, p_drop=0.1)
-    if cfg.ny % vit.patch != 0 or cfg.nx % vit.patch != 0:
+    vit_stride = cfg.vit_stride if cfg.vit_stride is not None else cfg.vit_patch
+    vit = ViTRefiner(
+        in_ch=1,
+        embed_dim=256,
+        patch=cfg.vit_patch,
+        stride=vit_stride,
+        depth=6,
+        heads=8,
+        mlp_ratio=4.0,
+        p_drop=0.1,
+    )
+    Hp, Wp = vit.embed.compute_grid_size(cfg.ny, cfg.nx)
+    ph, pw = vit.patch_size
+    sh, sw = vit.stride_size
+    if Hp <= 0 or Wp <= 0:
         raise ValueError(
-            f"Image dimensions (ny={cfg.ny}, nx={cfg.nx}) must be divisible by ViT patch size {vit.patch}."
+            "Image dimensions must be compatible with ViT patch and stride. "
+            f"Got (ny={cfg.ny}, nx={cfg.nx}) with patch={vit.patch_size} and stride={vit.stride_size}."
         )
-    vit._build_pos_embed(cfg.ny // vit.patch, cfg.nx // vit.patch, vit.embed_dim, device)
+    if (cfg.ny - ph) % sh != 0 or (cfg.nx - pw) % sw != 0:
+        raise ValueError(
+            "Image dimensions must align with patch/stride grid. "
+            f"Got (ny={cfg.ny}, nx={cfg.nx}), patch={vit.patch_size}, stride={vit.stride_size}."
+        )
+    vit._build_pos_embed(cfg.ny, cfg.nx, vit.embed_dim, device, dtype=torch.float32)
     freeze_bp = not cfg.trainable_apodization
     variant = cfg.model_variant.lower()
     if variant == "unrolled":
