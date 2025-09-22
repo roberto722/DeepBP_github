@@ -1,7 +1,9 @@
 """Streamlit dashboard per esplorare il modello DelayAndSumTransformer."""
+import json
 import os
 import sys
 import tempfile
+from dataclasses import fields
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -82,6 +84,101 @@ def main():
         st.sidebar.info(
             "Nessun esperimento trovato nella cartella padre."
         )
+
+    config_dict: Optional[dict] = None
+    config_source: Optional[Tuple[str, str]] = None
+    config_issue: Optional[str] = None
+    config_path = selected_run_path / "config.json"
+    if config_path.is_file():
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                loaded_config = json.load(f)
+            if isinstance(loaded_config, dict):
+                config_dict = loaded_config
+                config_source = ("file", config_path.name)
+            else:
+                config_issue = (
+                    f"Il file {config_path.name} non contiene una configurazione valida."
+                )
+        except (OSError, json.JSONDecodeError) as exc:
+            config_issue = f"Errore nella lettura di {config_path.name}: {exc}"
+
+    ckpt_fallback_errors: List[str] = []
+    if config_dict is None and selected_run_path.is_dir():
+        ckpt_files = [p for p in selected_run_path.glob("*.pt") if p.is_file()]
+        ckpt_name_to_path = {p.name: p for p in ckpt_files}
+        ckpt_names_sorted = sorted(ckpt_name_to_path.keys())
+        ckpts_priority = [
+            name for name in ("best.pt", "last.pt") if name in ckpt_name_to_path
+        ]
+        ckpt_candidates = ckpts_priority + [
+            name for name in ckpt_names_sorted if name not in ckpts_priority
+        ]
+        for ckpt_name in ckpt_candidates:
+            ckpt_path = ckpt_name_to_path[ckpt_name]
+            try:
+                payload = torch.load(ckpt_path, map_location="cpu")
+            except Exception as exc:  # noqa: BLE001
+                ckpt_fallback_errors.append(f"{ckpt_name}: {exc}")
+                continue
+            if isinstance(payload, dict) and isinstance(payload.get("config"), dict):
+                config_dict = payload["config"]
+                config_source = ("checkpoint", ckpt_name)
+                break
+
+    if config_dict is not None:
+        cfg_field_names = {field.name for field in fields(TrainConfig)}
+        filtered_config = {
+            key: value for key, value in config_dict.items() if key in cfg_field_names
+        }
+        missing_keys = sorted(cfg_field_names - filtered_config.keys())
+        try:
+            cfg = TrainConfig(**filtered_config)
+        except TypeError as exc:
+            st.sidebar.warning(
+                "Configurazione salvata non valida; verranno usati i valori di default. "
+                f"Dettagli: {exc}"
+            )
+            cfg = TrainConfig()
+        else:
+            if config_source is not None:
+                if config_source[0] == "file":
+                    st.sidebar.info(
+                        f"Configurazione caricata da {config_source[1]}."
+                    )
+                else:
+                    st.sidebar.info(
+                        f"Configurazione recuperata dal checkpoint {config_source[1]}."
+                    )
+            if config_issue is not None:
+                st.sidebar.warning(config_issue)
+            if missing_keys:
+                st.sidebar.warning(
+                    "Parametri mancanti nella configurazione salvata "
+                    f"({', '.join(missing_keys)}); sono stati usati i valori di default."
+                )
+    else:
+        if config_issue is not None:
+            st.sidebar.warning(
+                f"{config_issue} Verranno usati i valori di default."
+            )
+        elif not config_path.exists():
+            st.sidebar.warning(
+                "Configurazione non trovata per l'esperimento selezionato; verranno usati i valori di default."
+            )
+        elif ckpt_fallback_errors:
+            st.sidebar.warning(
+                "Impossibile recuperare la configurazione salvata dai checkpoint; verranno usati i valori di default."
+            )
+        else:
+            st.sidebar.warning(
+                "Impossibile recuperare la configurazione salvata; verranno usati i valori di default."
+            )
+        cfg = TrainConfig()
+        if ckpt_fallback_errors:
+            st.sidebar.caption(
+                "Dettagli: " + "; ".join(ckpt_fallback_errors[:1])
+            )
 
     cfg.work_dir = str(selected_run_path.resolve())
     work_dir = cfg.work_dir
