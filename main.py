@@ -370,6 +370,106 @@ class FkMigrationLinear(nn.Module):
         return img_mag
 
 
+class ForwardProjectionFk(nn.Module):
+    """Forward projection in frequency-wavenumber (f-k) domain."""
+
+    def __init__(self, migration: FkMigrationLinear):
+        super().__init__()
+        self.geom = migration.geom
+        object.__setattr__(self, "_migration", migration)
+
+    @property
+    def migration(self) -> FkMigrationLinear:
+        return self._migration
+
+    def get_apodization(
+        self, dtype: torch.dtype, device: torch.device, channels: int
+    ) -> torch.Tensor:
+        return self.migration.get_apodization(dtype, device, channels)
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        Project an image into the sinogram domain using the f-k model.
+
+        Args:
+            img: Tensor with shape [B, 1, ny, nx].
+
+        Returns:
+            Tensor with shape [B, 1, n_det, n_t].
+        """
+
+        B, C, ny, nx = img.shape
+        assert C == 1, "Expect image with a single channel."
+        assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
+
+        if nx != self.geom.n_det:
+            raise ValueError(
+                "ForwardProjectionFk requires image lateral size to match number of detectors."
+            )
+        if not math.isclose(self.geom.dx_m, self.geom.pitch_m, rel_tol=1e-6, abs_tol=1e-9):
+            raise ValueError(
+                "Image lateral sampling must match detector pitch for FK projection."
+            )
+
+        dtype_in = img.dtype
+        if dtype_in in (torch.float16, torch.bfloat16):
+            working_dtype = torch.float32
+        else:
+            working_dtype = dtype_in
+
+        if working_dtype == torch.float32:
+            complex_dtype = torch.complex64
+        elif working_dtype == torch.float64:
+            complex_dtype = torch.complex128
+        else:
+            raise TypeError(f"Unsupported dtype {dtype_in} for ForwardProjectionFk")
+
+        device = img.device
+
+        kx = self.migration.kx.to(device=device, dtype=working_dtype)
+        omega = self.migration.omega.to(device=device, dtype=working_dtype)
+        x_coords = self.migration.x_coords.to(device=device, dtype=working_dtype)
+        y_coords = self.migration.y_coords.to(device=device, dtype=working_dtype)
+
+        x_phase_coords = x_coords - self.geom.array_x0_m
+        y_phase_coords = y_coords - self.geom.array_y_m
+
+        n_kx = kx.numel()
+        n_freq = omega.numel()
+
+        img_line = img[:, 0, :, :].to(dtype=working_dtype)
+        img_fft = torch.fft.fft(img_line, n=n_kx, dim=-1)
+        phase_offset = torch.exp(-1j * (kx * x_phase_coords[0]))
+        img_fft = img_fft * phase_offset.view(1, 1, -1)
+        dx = torch.as_tensor(self.geom.dx_m, device=device, dtype=working_dtype)
+        img_fft = img_fft.to(dtype=complex_dtype) * dx.to(dtype=complex_dtype)
+
+        omega_term = (omega / self.geom.c_m_s) ** 2
+        kx_sq = kx ** 2
+        kz_sq = omega_term.view(1, -1) - kx_sq.view(-1, 1)
+        prop_mask = kz_sq > 0
+        kz = torch.sqrt(torch.clamp(kz_sq, min=0.0))
+        phase = y_phase_coords.view(ny, 1, 1) * kz.view(1, n_kx, n_freq)
+        phase_y = torch.exp(-1j * phase)
+        phase_y = phase_y.to(dtype=complex_dtype)
+        phase_y = phase_y * prop_mask.view(1, n_kx, n_freq).to(dtype=complex_dtype)
+
+        img_fft = img_fft.unsqueeze(1)  # [B, 1, ny, n_kx]
+        spec_fk = torch.einsum("bcyk,ykf->bckf", img_fft, phase_y)
+        dy = torch.as_tensor(self.geom.dy_m, device=device, dtype=complex_dtype)
+        spec_fk = spec_fk * dy
+
+        spec_t = torch.fft.ifft(spec_fk, dim=2)
+        sino = torch.fft.irfft(spec_t, n=self.geom.n_t, dim=-1)
+
+        apod = self.get_apodization(working_dtype, device, channels=1)
+        eps = torch.finfo(apod.dtype).tiny
+        norm = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
+        sino = sino / norm.view(1, 1, 1, 1)
+
+        return sino.to(dtype=dtype_in)
+
+
 class ForwardProjectionLinear(nn.Module):
     """
     Differentiable forward projection that reuses the LUT/apodization from
