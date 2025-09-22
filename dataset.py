@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import nibabel as nib
 from torch.utils.data import Dataset
 
+import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
 
@@ -80,6 +81,8 @@ def load_hdf5_sample(
         sinogram = minmax_scale(sinogram, sino_min, sino_max)
         if target is not None:
             target = minmax_scale(target, img_min, img_max)
+            # plt.imshow(target[0, :, :], cmap='gray')
+            # plt.show()
 
     return sinogram, target
 

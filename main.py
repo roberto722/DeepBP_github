@@ -1022,7 +1022,6 @@ def load_stats_json(path: str) -> dict:
 # ================================
 # Orchestrator
 # ================================
-
 @dataclass
 class TrainConfig:
     # Geometry / sampling
@@ -1034,14 +1033,14 @@ class TrainConfig:
     c_m_s: float = 1540.0              # Velocità del suono nei tessuti molli (m/s). Usata per convertire tempi di volo in distanze.
     x0_m: float = -0.019               # Coordinata x del bordo sinistro dell’immagine (in metri). ~ - (nx * dx)/2  if centered
     y0_m: float = 0.0                  # Coordinata y (profondità) del bordo superiore dell’immagine.
-    dx_m: float = 0.00015               # Spaziatura tra pixel sull’asse x.
-    dy_m: float = 0.00015               # Spaziatura tra pixel sull’asse y.
+    dx_m: float = 0.00015              # Spaziatura tra pixel sull’asse x.
+    dy_m: float = 0.00015              # Spaziatura tra pixel sull’asse y.
     nx: int = 256
     ny: int = 256
     array_x0_m: float = -0.019         # align first element with left image border (example)
     array_y_m: float = 0.0
     wavelength: int = 800
-    trainable_apodization: bool = False
+    trainable_apodization: bool = True
 
     # ViT refiner
     vit_patch: int = 16
@@ -1061,9 +1060,9 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 5
+    unroll_steps: int = 7
     data_consistency_weight: float = 1.0
-    learnable_data_consistency_weight: bool = False
+    learnable_data_consistency_weight: bool = True
 
     # --- Global scaling (per-domain) ---
     # If any of these is None, stats will be computed from the training set.
@@ -1073,13 +1072,13 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/das_transformer_fp32"
+    work_dir: str = "./runs/das_transformer_fp32_7_unroll"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
     save_val_images: bool = True
     max_val_images: int = 1
-    val_intermediate_indices: Optional[List[int]] = field(default_factory=lambda: [0, 1, 2, 3, 4])  # steps (0-based, allow negatives) to include when saving val images
+    val_intermediate_indices: Optional[List[int]] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # steps (0-based, allow negatives) to include when saving val images
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
