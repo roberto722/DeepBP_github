@@ -487,7 +487,9 @@ class ForwardProjectionFk(nn.Module):
             -1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1))
         ).to(dtype=complex_dtype)
         img_line_flat = img_line.reshape(B * ny, nx)
-        img_fft = torch.matmul(img_line_flat, phase_x.transpose(0, 1))
+        img_fft = torch.matmul(
+            img_line_flat.to(dtype=complex_dtype), phase_x.transpose(0, 1)
+        )
         img_fft = img_fft.view(B, ny, n_kx)
         dx = torch.as_tensor(self.geom.dx_m, device=device, dtype=working_dtype)
         img_fft = img_fft.to(dtype=complex_dtype) * dx.to(dtype=complex_dtype)
