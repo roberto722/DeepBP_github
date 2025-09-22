@@ -7,7 +7,7 @@ import random
 import shutil
 import warnings
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Literal
 
 import numpy as np
 from PIL import Image
@@ -236,14 +236,29 @@ class FkMigrationLinear(nn.Module):
         geom: LinearProbeGeom,
         trainable_apodization: bool = False,
         per_channel_apodization: bool = False,
+        fft_pad: int = 0,
+        window: Optional[str] = None,
     ):
         super().__init__()
         self.geom = geom
         self.trainable_apodization = trainable_apodization
         self.per_channel_apodization = per_channel_apodization
 
+        if fft_pad is None:
+            fft_pad = 0
+        if fft_pad < 0:
+            raise ValueError("fft_pad must be >= 0 for FkMigrationLinear")
+        self.fft_pad = int(fft_pad)
+        self.n_fft = geom.n_t + self.fft_pad
+        if self.n_fft <= 0:
+            raise ValueError("Invalid FFT size computed for FkMigrationLinear")
+
+        window_tensor = self._build_time_window(window, geom.n_t)
+        self.register_buffer("time_window", window_tensor)
+        self.window_type = None if window is None else window.lower()
+
         # Temporal frequency grid (angular frequency ω)
-        freq = torch.fft.rfftfreq(geom.n_t, d=geom.dt_s)
+        freq = torch.fft.rfftfreq(self.n_fft, d=geom.dt_s)
         omega = (2.0 * math.pi * freq).to(dtype=torch.float32)
         self.register_buffer("omega", omega)
 
@@ -251,7 +266,7 @@ class FkMigrationLinear(nn.Module):
         weight = torch.ones_like(omega)
         if omega.numel() > 2:
             weight[1:-1] = 2.0
-        if geom.n_t % 2 == 0 and omega.numel() > 1:
+        if self.n_fft % 2 == 0 and omega.numel() > 1:
             weight[-1] = 1.0
         self.register_buffer("freq_weight", weight)
         self.register_buffer("freq_weight_sum", weight.sum())
@@ -276,6 +291,26 @@ class FkMigrationLinear(nn.Module):
             self.apod = nn.Parameter(apod)
         else:
             self.register_buffer("apod", apod)
+
+    @staticmethod
+    def _build_time_window(window: Optional[str], length: int) -> torch.Tensor:
+        if length <= 0:
+            raise ValueError("Window length must be positive for FkMigrationLinear")
+        if window is None:
+            values = torch.ones(length, dtype=torch.float32)
+        else:
+            name = window.lower()
+            if name in {"hann", "hanning"}:
+                values = torch.hann_window(length, periodic=False, dtype=torch.float32)
+            elif name == "hamming":
+                values = torch.hamming_window(length, periodic=False, dtype=torch.float32)
+            elif name == "blackman":
+                values = torch.blackman_window(length, periodic=False, dtype=torch.float32)
+            elif name in {"rect", "rectangular", "none"}:
+                values = torch.ones(length, dtype=torch.float32)
+            else:
+                raise ValueError(f"Unsupported window '{window}' for FkMigrationLinear")
+        return values.to(dtype=torch.float32)
 
     def get_apodization(self, dtype: torch.dtype, device: torch.device, channels: int) -> torch.Tensor:
         """Return detector apodization replicated per channel if requested."""
@@ -317,12 +352,15 @@ class FkMigrationLinear(nn.Module):
         std = torch.sqrt(var + eps)
         sino_norm = sino_norm / std
 
+        time_window = self.time_window.to(device=device, dtype=dtype)
+        sino_windowed = sino_norm * time_window.view(1, 1, 1, -1)
+
         apod = self.get_apodization(dtype, device, C)
         apod_view = apod.unsqueeze(0).unsqueeze(-1)  # [1, C, n_det, 1]
-        sino_weighted = sino_norm * apod_view
+        sino_weighted = sino_windowed * apod_view
 
         # Frequency transforms
-        spec_t = torch.fft.rfft(sino_weighted, dim=-1)
+        spec_t = torch.fft.rfft(sino_weighted, n=self.n_fft, dim=-1)
         spec_fk = torch.fft.fft(spec_t, dim=2)
 
         real_dtype = spec_fk.real.dtype
@@ -376,6 +414,7 @@ class ForwardProjectionFk(nn.Module):
     def __init__(self, migration: FkMigrationLinear):
         super().__init__()
         self.geom = migration.geom
+        self.n_fft = getattr(migration, "n_fft", migration.geom.n_t)
         object.__setattr__(self, "_migration", migration)
 
     @property
@@ -460,7 +499,9 @@ class ForwardProjectionFk(nn.Module):
         spec_fk = spec_fk * dy
 
         spec_t = torch.fft.ifft(spec_fk, dim=2)
-        sino = torch.fft.irfft(spec_t, n=self.geom.n_t, dim=-1)
+        sino = torch.fft.irfft(spec_t, n=self.n_fft, dim=-1)
+        if self.n_fft != self.geom.n_t:
+            sino = sino[..., : self.geom.n_t]
 
         apod = self.get_apodization(working_dtype, device, channels=1)
         eps = torch.finfo(apod.dtype).tiny
@@ -647,7 +688,7 @@ class LocalFusionBlock(nn.Module):
 
 class ViTRefiner(nn.Module):
     """
-    Simple ViT-like refiner that denoises/refines the Delay-and-Sum (DAS) image.
+    Simple ViT-like refiner that denoises/refines the beamformed image.
     Input:  [B, 1, H, W]
     Output: [B, 1, H, W]
     """
@@ -799,41 +840,46 @@ def adapt_vitrefiner_state_dict(state_dict: dict) -> Tuple[dict, bool]:
 
 
 # ================================
-# Full Model: Delay-and-Sum (fixed) + Transformer (trainable)
+# Full Model: Beamformer (fixed) + Transformer (trainable)
 # ================================
 
 class DelayAndSumTransformer(nn.Module):
-    def __init__(self, das: DelayAndSumLinear, vit: ViTRefiner, freeze_das: bool = True):
+    def __init__(
+        self,
+        beamformer: nn.Module,
+        vit: ViTRefiner,
+        freeze_beamformer: bool = True,
+    ):
         super().__init__()
-        self.das = das
+        self.beamformer = beamformer
         self.vit = vit
-        if freeze_das:
-            for p in self.das.parameters():
+        if freeze_beamformer:
+            for p in self.beamformer.parameters():
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        das_img = self.das(sino)   # [B, 1, H, W]
-        out = self.vit(das_img)    # [B, 1, H, W]
+        initial_img = self.beamformer(sino)   # [B, 1, H, W]
+        out = self.vit(initial_img)           # [B, 1, H, W]
         intermediates = [out]
-        return out, das_img, intermediates
+        return out, initial_img, intermediates
 
 
 class UnrolledDelayAndSumTransformer(nn.Module):
     def __init__(
         self,
-        das_module: DelayAndSumLinear,
-        forward_module: ForwardProjectionLinear,
+        beamformer_module: nn.Module,
+        forward_module: nn.Module,
         vit_module: ViTRefiner,
         num_steps: int,
         data_consistency_weight: float = 1.0,
         learnable_data_consistency_weight: bool = False,
-        freeze_das: bool = False,
+        freeze_beamformer: bool = False,
     ):
         super().__init__()
         if num_steps < 1:
             raise ValueError("num_steps must be >= 1 for UnrolledDelayAndSumTransformer")
-        self.das = das_module
-        self.forward_projector = forward_module
+        self.beamformer = beamformer_module
+        self.forward_operator = forward_module
         self.vit = vit_module
         self.num_steps = int(num_steps)
         weight = torch.tensor(float(data_consistency_weight), dtype=torch.float32)
@@ -841,21 +887,21 @@ class UnrolledDelayAndSumTransformer(nn.Module):
             self.data_consistency_weight = nn.Parameter(weight)
         else:
             self.register_buffer("data_consistency_weight", weight)
-        if freeze_das:
-            for p in self.das.parameters():
+        if freeze_beamformer:
+            for p in self.beamformer.parameters():
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        x0 = self.das(sino)
+        x0 = self.beamformer(sino)
         xi = x0
         intermediates: List[torch.Tensor] = []
 
         weight = self.data_consistency_weight.view(1, 1, 1, 1)
 
         for _ in range(self.num_steps):
-            sino_est = self.forward_projector(xi)
+            sino_est = self.forward_operator(xi)
             sino_residual = sino - sino_est
-            correction = self.das(sino_residual)
+            correction = self.beamformer(sino_residual)
             xi = xi + weight * correction
             xi = self.vit(xi)
             intermediates.append(xi)
@@ -869,14 +915,14 @@ def run_inference_steps(
     cfg: "TrainConfig",
     device: Optional[torch.device] = None,
     normalize: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[List[torch.Tensor]]]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, Optional[List[torch.Tensor]]]:
     """
-    Return normalized sinogram, Delay-and-Sum (DAS) image, final output and the full per-step
+    Return normalized sinogram, (optional) initial beamformed image, final output and the full per-step
     sequence.
 
-    ``iter_imgs`` always includes the DAS image as step 0 and, when available, all
+    ``iter_imgs`` always includes the beamformer output as step 0 and, when available, all
     subsequent iterations up to the final reconstruction. When a model does not
-    expose intermediate steps the list may contain only the DAS result and the final
+    expose intermediate steps the list may contain only the initial result and the final
     prediction (or be ``None`` when unavailable).
     """
     if device is None:
@@ -898,11 +944,11 @@ def run_inference_steps(
 
     model.eval()
     with torch.no_grad():
-        pred, das_img, intermediates = model(sino_norm)
+        pred, beamformer_img, intermediates = model(sino_norm)
 
     iter_sequence: List[torch.Tensor] = []
-    if das_img is not None:
-        iter_sequence.append(das_img)
+    if beamformer_img is not None:
+        iter_sequence.append(beamformer_img)
 
     if intermediates is not None:
         if isinstance(intermediates, (list, tuple)):
@@ -915,9 +961,11 @@ def run_inference_steps(
 
     iter_imgs = [step.detach().cpu() for step in iter_sequence] if iter_sequence else None
 
+    beamformer_cpu = beamformer_img.detach().cpu() if beamformer_img is not None else None
+
     return (
         sino_norm.detach().cpu(),
-        das_img.detach().cpu(),
+        beamformer_cpu,
         pred.detach().cpu(),
         iter_imgs,
     )
@@ -991,14 +1039,14 @@ def ssim(
 def save_side_by_side(
     pred: torch.Tensor,
     gt: torch.Tensor,
-    das: torch.Tensor,
+    initial: torch.Tensor,
     out_path: str,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
     iter_steps: Optional[List[Tuple[int, torch.Tensor]]] = None,
 ):
     """
-    Save a side-by-side image [DAS | (optional intermediate steps) | Pred | GT].
+    Save a side-by-side image [Initial | (optional intermediate steps) | Pred | GT].
 
     Expects tensors in shape [1, H, W] and roughly [0,1] range.
     """
@@ -1024,7 +1072,7 @@ def save_side_by_side(
 
     panels: List[Image.Image] = []
 
-    panels.append(to_uint8(das))
+    panels.append(to_uint8(initial))
 
     if iter_steps:
         seen = set()
@@ -1109,8 +1157,10 @@ def validate(
             sino = sino.to(device, non_blocking=True)
             img  = img.to(device, non_blocking=True)
 
-            pred, das, intermediates = model(sino)           # forward in FP32
-            iter_sequence: List[torch.Tensor] = [das]
+            pred, initial, intermediates = model(sino)           # forward in FP32
+            iter_sequence: List[torch.Tensor] = []
+            if initial is not None:
+                iter_sequence.append(initial)
             if intermediates is not None:
                 if isinstance(intermediates, (list, tuple)):
                     iter_sequence.extend(intermediates)
@@ -1172,10 +1222,11 @@ def validate(
                         if selected:
                             selected.sort(key=lambda item: item[0])
                             debug_steps = selected
+                    initial_panel = initial[b] if initial is not None else pred[b]
                     save_side_by_side(
                         pred[b],
                         img[b],
-                        das[b],
+                        initial_panel,
                         out_path,
                         iter_steps=debug_steps,
                     )
@@ -1201,7 +1252,7 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, optimizer, device: tor
         sino = sino.to(device, non_blocking=True)
         img  = img.to(device, non_blocking=True)
 
-        pred, das_img, intermediates = model(sino)                    # forward in FP32
+        pred, _, _ = model(sino)                    # forward in FP32
         weights = compute_intensity_weights(img, weight_alpha, weight_threshold)
         loss_weighted_l1 = torch.mean(weights * torch.abs(pred - img))
 
@@ -1284,6 +1335,9 @@ class TrainConfig:
     array_y_m: float = 0.0
     wavelength: int = 800
     trainable_apodization: bool = True
+    beamformer_type: Literal["das", "fk"] = "das"
+    fk_fft_pad: int = 0
+    fk_window: Optional[str] = None
 
     # ViT refiner
     vit_patch: int = 16
@@ -1338,18 +1392,40 @@ def build_projection_operators(
     cfg: TrainConfig,
     device: torch.device,
     trainable_apodization: bool = False,
-) -> Tuple[DelayAndSumLinear, ForwardProjectionLinear]:
-    """Construct Delay-and-Sum and forward-projection operators sharing the same LUT."""
+) -> Tuple[nn.Module, nn.Module]:
+    """Construct beamformer and forward operators according to configuration."""
     geom = build_geometry(cfg)
-    lut = build_delay_and_sum_lut(geom, device=device)
-    das = DelayAndSumLinear(geom, lut, trainable_apodization=trainable_apodization)
-    fp = ForwardProjectionLinear(das)
-    return das, fp
+    beamformer_type = cfg.beamformer_type.lower()
+
+    if beamformer_type == "das":
+        lut = build_delay_and_sum_lut(geom, device=device)
+        beamformer = DelayAndSumLinear(
+            geom,
+            lut,
+            trainable_apodization=trainable_apodization,
+        )
+        forward_op = ForwardProjectionLinear(beamformer)
+    elif beamformer_type == "fk":
+        fft_pad = cfg.fk_fft_pad if cfg.fk_fft_pad is not None else 0
+        beamformer = FkMigrationLinear(
+            geom,
+            trainable_apodization=trainable_apodization,
+            per_channel_apodization=False,
+            fft_pad=fft_pad,
+            window=cfg.fk_window,
+        )
+        forward_op = ForwardProjectionFk(beamformer)
+    else:
+        raise ValueError(
+            f"Unsupported beamformer_type '{cfg.beamformer_type}'. Expected 'das' or 'fk'."
+        )
+
+    return beamformer, forward_op
 
 
 def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
-    """Build DelayAndSumTransformer (DAS + ViT) according to the provided configuration."""
-    das, fp = build_projection_operators(
+    """Build beamformer + ViT refiner according to the provided configuration."""
+    beamformer, forward_op = build_projection_operators(
         cfg,
         device,
         trainable_apodization=cfg.trainable_apodization,
@@ -1379,19 +1455,19 @@ def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
             f"Got (ny={cfg.ny}, nx={cfg.nx}), patch={vit.patch_size}, stride={vit.stride_size}."
         )
     vit._build_pos_embed(cfg.ny, cfg.nx, vit.embed_dim, device, dtype=torch.float32)
-    freeze_das = not cfg.trainable_apodization
+    freeze_beamformer = not cfg.trainable_apodization
     variant = cfg.model_variant.lower()
     if variant == "unrolled":
         if cfg.unroll_steps < 1:
             raise ValueError("TrainConfig.unroll_steps must be >= 1 for the unrolled variant")
         model = UnrolledDelayAndSumTransformer(
-            das,
-            fp,
+            beamformer,
+            forward_op,
             vit,
             num_steps=cfg.unroll_steps,
             data_consistency_weight=cfg.data_consistency_weight,
             learnable_data_consistency_weight=cfg.learnable_data_consistency_weight,
-            freeze_das=freeze_das,
+            freeze_beamformer=freeze_beamformer,
         )
     elif variant in {"baseline", "das_transformer", "bp_transformer"}:
         if variant == "bp_transformer":
@@ -1399,7 +1475,7 @@ def create_model(cfg: TrainConfig, device: torch.device) -> nn.Module:
                 "TrainConfig.model_variant='bp_transformer' is deprecated; use 'das_transformer' instead.",
                 DeprecationWarning,
             )
-        model = DelayAndSumTransformer(das, vit, freeze_das=freeze_das)
+        model = DelayAndSumTransformer(beamformer, vit, freeze_beamformer=freeze_beamformer)
     else:
         raise ValueError(f"Unknown model variant '{cfg.model_variant}'.")
     model = model.to(device)
@@ -1453,7 +1529,7 @@ def main():
     img_dir = os.path.join(cfg.work_dir, "val_images")
     os.makedirs(img_dir, exist_ok=True)
 
-    # Build model (DAS module + ViT)
+    # Build model (beamformer module + ViT)
     model = create_model(cfg, device)
 
     # Optimizer (train all parameters requiring gradients)

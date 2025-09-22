@@ -1,4 +1,4 @@
-"""Streamlit dashboard per esplorare il modello DelayAndSumTransformer."""
+"""Streamlit dashboard per esplorare il modello BeamformerTransformer."""
 import json
 import os
 import sys
@@ -56,8 +56,8 @@ def plot_outputs(images: List[Tuple[str, np.ndarray]], sinogram: bool = False):
 
 
 def main():
-    st.set_page_config(page_title="DelayAndSumTransformer Dashboard", layout="wide")
-    st.title("Dashboard DelayAndSumTransformer")
+    st.set_page_config(page_title="Deep Beamformer Dashboard", layout="wide")
+    st.title("Dashboard Deep Beamformer")
 
     cfg = TrainConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -261,7 +261,7 @@ def main():
                 require_target=False,
             )
 
-            sino_norm, das_img, pred_img, iter_imgs = run_inference_steps(
+            sino_norm, initial_img, pred_img, iter_imgs = run_inference_steps(
                 model,
                 sinogram_raw,
                 cfg,
@@ -270,14 +270,17 @@ def main():
             )
 
             sino_plot = tensor_to_numpy(sino_norm[0])
-            das_plot = tensor_to_numpy(das_img[0])
+            initial_plot = (
+                tensor_to_numpy(initial_img[0]) if initial_img is not None else None
+            )
             pred_plot = tensor_to_numpy(pred_img[0])
 
-            images = [
+            images: List[Tuple[str, np.ndarray]] = [
                 ("Sinogramma normalizzato", sino_plot),
-                ("Delay-and-Sum", das_plot),
-                ("Predizione ViTRefiner", pred_plot),
             ]
+            if initial_plot is not None:
+                images.append(("Output beamformer", initial_plot))
+            images.append(("Predizione ViTRefiner", pred_plot))
 
             metrics_values = None
             if target is not None:
@@ -326,6 +329,7 @@ def main():
                 mae_col.metric("MAE", f"{metrics_values['mae']:.4f}")
             plot_outputs(images, sinogram=True)
 
+            has_initial = initial_img is not None
             if iter_imgs:
                 total_steps = len(iter_imgs)
                 iter_arrays: List[np.ndarray] = []
@@ -333,8 +337,8 @@ def main():
                 for idx, step_tensor in enumerate(iter_imgs):
                     sample_tensor = step_tensor[0] if step_tensor.dim() > 0 else step_tensor
                     iter_arrays.append(tensor_to_numpy(sample_tensor))
-                    if idx == 0:
-                        label = f"Step {idx} (DAS)"
+                    if idx == 0 and has_initial:
+                        label = f"Step {idx} (beamformer)"
                     elif idx == total_steps - 1:
                         label = f"Step {idx} (finale)"
                     else:
