@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 
 nib.imageglobals.logger.setLevel(40)
 
+
 def minmax_scale(x: torch.Tensor, vmin: float, vmax: float, eps: float = 1e-12) -> torch.Tensor:
     """Scale to [0,1] with global min/max; safely handle zero-range."""
     rng = max(vmax - vmin, eps)
@@ -85,6 +86,7 @@ def load_hdf5_sample(
             # plt.show()
 
     return sinogram, target
+
 
 class HDF5Dataset(Dataset):
     def __init__(self, input_dir, target_dir, sino_min: float, sino_max: float, img_min: float, img_max: float, split='train', wavelength=800, target_shape=(128, 1640)):
