@@ -27,6 +27,7 @@ class BackProjectionReconstructorTorch:
                  y0: float = 0.0,                    # quota della sonda (m), es. 0.0
                  derivative_order: int = 1,         # 1 o 2 (derivata temporale)
                  use_inv_r_weight: bool = True,     # usa peso 1/r
+                 validate_linear_das: bool = False, # diagnostica DAS per geometry='linear'
                  cropped_or_unrecorded_at_start: int = 0,
                  psf_1d: Optional[torch.Tensor] = None,   # 1D kernel lungo il tempo
                  K_torch: Optional[torch.Tensor] = None,  # (Nt x Nt) solo per ring/opzionale
@@ -45,6 +46,7 @@ class BackProjectionReconstructorTorch:
         self.derivative_order = int(derivative_order)
         assert self.derivative_order in (1, 2)
         self.use_inv_r_weight = bool(use_inv_r_weight)
+        self.validate_linear_das = bool(validate_linear_das)
 
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -96,6 +98,49 @@ class BackProjectionReconstructorTorch:
         y = y / (dt ** order)
         return y
 
+    def _diagnostic_compare_linear_das(
+            self,
+            sig_dt: torch.Tensor,
+            tof: torch.Tensor,
+            dist: torch.Tensor,
+            t_sec: torch.Tensor,
+            image_shape: Tuple[int, int],
+            p0: torch.Tensor) -> None:
+        """Confronta p0 con una DAS di riferimento (nearest-neighbour)."""
+        if not self.validate_linear_das:
+            return
+
+        with torch.no_grad():
+            H, W = image_shape
+            Nt, Np = sig_dt.shape
+            dt = 1.0 / self.fs
+            t0 = float(t_sec[0].item())
+
+            hw = H * W
+            tof_flat = tof.reshape(hw, Np)
+            dist_flat = dist.reshape(hw, Np)
+
+            p0_ref = torch.zeros(hw, dtype=sig_dt.dtype, device=sig_dt.device)
+            eps = 1e-9
+            for det in range(Np):
+                t_det = tof_flat[:, det]
+                idx_float = (t_det - t0) / dt
+                idx_round = torch.round(idx_float).to(torch.long)
+                idx_round = torch.clamp(idx_round, 0, Nt - 1)
+                samples = sig_dt[idx_round, det]
+                if self.use_inv_r_weight:
+                    samples = samples / (dist_flat[:, det] + eps)
+                p0_ref += samples
+
+            p0_ref = p0_ref.view(H, W)
+            diff = (p0_ref - p0).abs()
+            max_err = float(diff.max().item())
+            mean_err = float(diff.mean().item())
+            denom = torch.norm(p0_ref.reshape(-1)) + 1e-12
+            rel_l2 = float(torch.norm((p0_ref - p0).reshape(-1)) / denom)
+            print(f"[Linear DAS diagnostic] max|diff|={max_err:.3e}, "
+                  f"mean|diff|={mean_err:.3e}, relL2={rel_l2:.3e}")
+
     def reconstruct_single(self,
                            sinogram: torch.Tensor,   # [1, Nt, Np] oppure [Nt, Np]
                            fov_x: torch.Tensor,      # [H, W]
@@ -115,12 +160,6 @@ class BackProjectionReconstructorTorch:
         t_samples = torch.arange(1, Nt + 1, device=device, dtype=torch.float32) + self.start_crop
         t_sec = t_samples * dt  # [Nt]
 
-        # Pre-elaborazione comune: integrazione radiale + PSF
-        sig_scaled = sig / self.c
-        sig_int = self._cumtrapz_constant_dt(sig_scaled, dt, dim=0)  # [Nt, Np]
-        sig_radial = sig_int / t_sec.view(-1, 1)
-        sig_pref = self._prefilter_time_conv(sig_radial)  # [Nt, Np]
-
         # Precompute pixel grid
         fov_x = fov_x.to(device).float()
         fov_y = fov_y.to(device).float()
@@ -130,6 +169,11 @@ class BackProjectionReconstructorTorch:
 
         if self.geometry == "ring":
             # ===== Geometria circolare (come prima) =====
+            sig_scaled = sig / self.c
+            sig_int = self._cumtrapz_constant_dt(sig_scaled, dt, dim=0)  # [Nt, Np]
+            sig_radial = sig_int / t_sec.view(-1, 1)
+            sig_pref = self._prefilter_time_conv(sig_radial)  # [Nt, Np]
+
             angular_offset = (180.0 - self.angular_coverage) / 2.0
             th = -torch.linspace(angular_offset, 180.0 - angular_offset, Np, device=device) * (np.pi / 180.0)
             cos_th, sin_th = torch.cos(th), torch.sin(th)
@@ -177,8 +221,9 @@ class BackProjectionReconstructorTorch:
             tx = torch.linspace(-aperture / 2, aperture / 2, Np, device=device)
             ty = torch.full((Np,), self.y0, device=device)
 
-            # Derivata temporale (ordine 1 o 2)
-            sig_dt = self._time_derivative(sig_pref, order=self.derivative_order)  # [Nt, Np]
+            # PSF opzionale + derivata temporale (ordine 1 o 2)
+            sig_filtered = self._prefilter_time_conv(sig)
+            sig_dt = self._time_derivative(sig_filtered, order=self.derivative_order)  # [Nt, Np]
 
             dx = X - tx.view(1, -1)
             dy = Y - ty.view(1, -1)
@@ -199,6 +244,12 @@ class BackProjectionReconstructorTorch:
 
             # Delay-and-sum (scalare). Molti UBP usano solo la somma; dt è già considerato nella derivata.
             p0 = vals.sum(dim=1).view(H, W)
+            self._diagnostic_compare_linear_das(sig_dt=sig_dt,
+                                                tof=tof,
+                                                dist=dist,
+                                                t_sec=t_sec,
+                                                image_shape=(H, W),
+                                                p0=p0)
             # opzionale: normalizzazione per Np
             # p0 = p0 / Np
             return p0
@@ -426,6 +477,7 @@ if __name__ == "__main__":
         y0=y0_m,
         derivative_order=1,  # 1 o 2
         use_inv_r_weight=True,
+        validate_linear_das=True,
         # i seguenti ignorati in linear:
         angular_coverage_deg=180.0,
         detector_radius=0.02,
