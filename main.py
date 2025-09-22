@@ -416,6 +416,7 @@ class ForwardProjectionFk(nn.Module):
         self.geom = migration.geom
         self.n_fft = getattr(migration, "n_fft", migration.geom.n_t)
         object.__setattr__(self, "_migration", migration)
+        self._warned_sampling_mismatch = False
 
     @property
     def migration(self) -> FkMigrationLinear:
@@ -441,14 +442,19 @@ class ForwardProjectionFk(nn.Module):
         assert C == 1, "Expect image with a single channel."
         assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
 
-        if nx != self.geom.n_det:
-            raise ValueError(
-                "ForwardProjectionFk requires image lateral size to match number of detectors."
+        if (
+            (nx != self.geom.n_det)
+            or not math.isclose(
+                self.geom.dx_m, self.geom.pitch_m, rel_tol=1e-6, abs_tol=1e-9
             )
-        if not math.isclose(self.geom.dx_m, self.geom.pitch_m, rel_tol=1e-6, abs_tol=1e-9):
-            raise ValueError(
-                "Image lateral sampling must match detector pitch for FK projection."
+        ) and not self._warned_sampling_mismatch:
+            warnings.warn(
+                "ForwardProjectionFk received an image grid that does not match the detector "
+                "sampling. The forward projection will internally resample along the lateral "
+                "axis; please verify that geometry parameters are correct for best accuracy.",
+                RuntimeWarning,
             )
+            self._warned_sampling_mismatch = True
 
         dtype_in = img.dtype
         if dtype_in in (torch.float16, torch.bfloat16):
@@ -477,9 +483,12 @@ class ForwardProjectionFk(nn.Module):
         n_freq = omega.numel()
 
         img_line = img[:, 0, :, :].to(dtype=working_dtype)
-        img_fft = torch.fft.fft(img_line, n=n_kx, dim=-1)
-        phase_offset = torch.exp(-1j * (kx * x_phase_coords[0]))
-        img_fft = img_fft * phase_offset.view(1, 1, -1)
+        phase_x = torch.exp(
+            -1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1))
+        ).to(dtype=complex_dtype)
+        img_line_flat = img_line.reshape(B * ny, nx)
+        img_fft = torch.matmul(img_line_flat, phase_x.transpose(0, 1))
+        img_fft = img_fft.view(B, ny, n_kx)
         dx = torch.as_tensor(self.geom.dx_m, device=device, dtype=working_dtype)
         img_fft = img_fft.to(dtype=complex_dtype) * dx.to(dtype=complex_dtype)
 
