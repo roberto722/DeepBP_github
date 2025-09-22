@@ -2,6 +2,7 @@
 
 import os
 import json
+import math
 import random
 import shutil
 import warnings
@@ -225,6 +226,148 @@ class DelayAndSumLinear(nn.Module):
         out = out / norm
 
         return out.unsqueeze(1)  # [B, 1, ny, nx]
+
+
+class FkMigrationLinear(nn.Module):
+    """Frequency-wavenumber migration for linear probe acquisitions."""
+
+    def __init__(
+        self,
+        geom: LinearProbeGeom,
+        trainable_apodization: bool = False,
+        per_channel_apodization: bool = False,
+    ):
+        super().__init__()
+        self.geom = geom
+        self.trainable_apodization = trainable_apodization
+        self.per_channel_apodization = per_channel_apodization
+
+        # Temporal frequency grid (angular frequency ω)
+        freq = torch.fft.rfftfreq(geom.n_t, d=geom.dt_s)
+        omega = (2.0 * math.pi * freq).to(dtype=torch.float32)
+        self.register_buffer("omega", omega)
+
+        # Weights for positive frequencies (double interior terms)
+        weight = torch.ones_like(omega)
+        if omega.numel() > 2:
+            weight[1:-1] = 2.0
+        if geom.n_t % 2 == 0 and omega.numel() > 1:
+            weight[-1] = 1.0
+        self.register_buffer("freq_weight", weight)
+        self.register_buffer("freq_weight_sum", weight.sum())
+
+        # Lateral wavenumbers k_x
+        kx = torch.fft.fftfreq(geom.n_det, d=geom.pitch_m)
+        kx = (2.0 * math.pi * kx).to(dtype=torch.float32)
+        self.register_buffer("kx", kx)
+
+        # Pixel coordinates in meters
+        xs = geom.x0_m + torch.arange(geom.nx, dtype=torch.float32) * geom.dx_m
+        ys = geom.y0_m + torch.arange(geom.ny, dtype=torch.float32) * geom.dy_m
+        self.register_buffer("x_coords", xs)
+        self.register_buffer("y_coords", ys)
+
+        # Optional apodization window (Hanning)
+        win = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(geom.n_det) / max(geom.n_det - 1, 1))
+        apod = torch.from_numpy(win.astype(np.float32))
+        if per_channel_apodization:
+            apod = apod.unsqueeze(0)
+        if trainable_apodization:
+            self.apod = nn.Parameter(apod)
+        else:
+            self.register_buffer("apod", apod)
+
+    def get_apodization(self, dtype: torch.dtype, device: torch.device, channels: int) -> torch.Tensor:
+        """Return detector apodization replicated per channel if requested."""
+        apod = self.apod
+        if self.trainable_apodization:
+            apod = apod.abs()
+        apod = apod.to(device=device, dtype=dtype)
+
+        if self.per_channel_apodization:
+            if apod.dim() == 1:
+                apod = apod.unsqueeze(0)
+            if apod.shape[0] == 1 and channels > 1:
+                apod = apod.expand(channels, -1)
+            elif apod.shape[0] != channels:
+                base = apod.mean(dim=0, keepdim=True)
+                apod = base.expand(channels, -1)
+        else:
+            if apod.dim() == 2:
+                apod = apod[0]
+            apod = apod.view(1, -1).expand(channels, -1)
+
+        if self.trainable_apodization:
+            apod = apod.clamp_min(torch.finfo(apod.dtype).tiny)
+        return apod
+
+    def forward(self, sino: torch.Tensor) -> torch.Tensor:
+        """Apply f-k migration to a sinogram of shape [B, C, n_det, n_t]."""
+        B, C, n_det, n_t = sino.shape
+        assert n_det == self.geom.n_det and n_t == self.geom.n_t, "Sinogram dims mismatch geometry."
+
+        dtype = sino.dtype
+        device = sino.device
+        eps = torch.finfo(dtype).eps
+
+        # Normalize each sinogram to reduce dynamic range differences
+        mean = sino.mean(dim=(-1, -2), keepdim=True)
+        sino_norm = sino - mean
+        var = sino_norm.pow(2).mean(dim=(-1, -2), keepdim=True)
+        std = torch.sqrt(var + eps)
+        sino_norm = sino_norm / std
+
+        apod = self.get_apodization(dtype, device, C)
+        apod_view = apod.unsqueeze(0).unsqueeze(-1)  # [1, C, n_det, 1]
+        sino_weighted = sino_norm * apod_view
+
+        # Frequency transforms
+        spec_t = torch.fft.rfft(sino_weighted, dim=-1)
+        spec_fk = torch.fft.fft(spec_t, dim=2)
+
+        real_dtype = spec_fk.real.dtype
+        omega = self.omega.to(device=device, dtype=real_dtype)
+        kx = self.kx.to(device=device, dtype=real_dtype)
+
+        omega_term = (omega / self.geom.c_m_s) ** 2  # (n_freq,)
+        kx_sq = kx ** 2  # (n_det,)
+
+        kz_sq = omega_term.view(1, 1, 1, -1) - kx_sq.view(1, 1, -1, 1)
+        kz_sq = torch.clamp(kz_sq, min=0.0)
+        kz = torch.sqrt(kz_sq)
+        prop_mask = (kz_sq > 0).to(spec_fk.dtype)
+
+        freq_weight = self.freq_weight.to(device=device, dtype=real_dtype)
+        freq_weight_sum = torch.clamp(self.freq_weight_sum.to(device=device, dtype=dtype), min=eps)
+        freq_weight = freq_weight.view(1, 1, 1, -1).to(dtype=spec_fk.dtype)
+
+        spec_fk = spec_fk * prop_mask
+
+        x_phase_coords = (self.x_coords - self.geom.array_x0_m).to(device=device, dtype=real_dtype)
+        y_phase_coords = (self.y_coords - self.geom.array_y_m).to(device=device, dtype=real_dtype)
+        phase_x = torch.exp(1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1)))
+        phase_x = phase_x.to(dtype=spec_fk.dtype)
+
+        kz = kz.to(dtype=spec_fk.real.dtype)
+        lines: List[torch.Tensor] = []
+        for y_val in y_phase_coords:
+            phase_y = torch.exp(1j * (kz * y_val))
+            phase_y = phase_y.to(dtype=spec_fk.dtype)
+            weighted = spec_fk * phase_y * freq_weight
+            band = weighted.sum(dim=-1)  # [B, C, n_det]
+            band = band.reshape(B * C, self.geom.n_det)
+            line = torch.matmul(band, phase_x)
+            line = line.view(B, C, self.geom.nx)
+            lines.append(line)
+
+        img_complex = torch.stack(lines, dim=2)  # [B, C, ny, nx]
+        img_mag = img_complex.abs().to(dtype)
+
+        apod_sum = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
+        norm = apod_sum.view(1, C, 1, 1) * freq_weight_sum.reshape(1, 1, 1, 1)
+        img_mag = img_mag / norm
+
+        return img_mag
 
 
 class ForwardProjectionLinear(nn.Module):
