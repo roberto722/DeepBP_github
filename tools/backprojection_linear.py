@@ -26,9 +26,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Mapping, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -465,6 +466,44 @@ def backproject_waveeq_linear(
 # CLI helpers
 # -----------------------------------------------------------------------------
 
+DEFAULT_RUN_CONFIG: Optional[Mapping[str, object]] = {
+    "input": Path("sample.hdf5"),
+    "data_root": Path("/path/to/datasets_transformer_proj"),
+    "sino_dir": Path("Forearm2000_hdf5/train_val_tst"),
+    "recs_dir": Path("Forearm2000_recs/L1_Shearlet"),
+    "split": "val",
+    "summary": True,
+}
+"""Optional mapping of CLI arguments used when no command-line input is given.
+
+The mapping keys correspond to the ``argparse`` destinations (e.g. ``input``
+for ``--input`` and ``data_root`` for ``--data-root``).  Edit the values to
+match your local dataset layout; set the variable to ``None`` to disable the
+behaviour and require explicit CLI arguments instead.
+"""
+
+
+def config_to_argv(config: Mapping[str, object]) -> list[str]:
+    """Return a ``sys.argv``-style list from a mapping of CLI destinations."""
+
+    argv: list[str] = []
+    for key, value in config.items():
+        if value is None:
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool):
+            if value:
+                argv.append(flag)
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                argv.extend([flag, str(item)])
+            continue
+        argv.extend([flag, str(value)])
+    return argv
+
+# -----------------------------------------------------------------------------
+
 def build_field_of_view(geom: LinearProbeGeom) -> Tuple[np.ndarray, np.ndarray]:
     """Return the spatial sampling grid in meters."""
 
@@ -640,7 +679,15 @@ def resolve_input_path(args: argparse.Namespace) -> Path:
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    if argv is None:
+        argv_list = list(sys.argv[1:])
+    else:
+        argv_list = list(argv)
+
+    if not argv_list and DEFAULT_RUN_CONFIG:
+        argv_list = config_to_argv(DEFAULT_RUN_CONFIG)
+
+    args = parser.parse_args(argv_list)
 
     cfg = TrainConfig()
     cfg = apply_geometry_overrides(cfg, args)
