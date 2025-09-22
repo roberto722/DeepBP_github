@@ -1344,7 +1344,7 @@ class TrainConfig:
     array_y_m: float = 0.0
     wavelength: int = 800
     trainable_apodization: bool = True
-    beamformer_type: Literal["das", "fk"] = "das"
+    beamformer_type: Literal["das", "fk"] = "fk"
     fk_fft_pad: int = 0
     fk_window: Optional[str] = None
 
@@ -1378,7 +1378,7 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/das_transformer_fp32_7_unroll"
+    work_dir: str = "./runs/fk_transformer_fp32_7_unroll"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
