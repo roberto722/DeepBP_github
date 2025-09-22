@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import torch
+import torch.nn.functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -21,6 +22,8 @@ from main import (
     TrainConfig,
     create_model,
     load_checkpoint,
+    psnr,
+    ssim,
     run_inference_steps,
 )
 
@@ -276,13 +279,51 @@ def main():
                 ("Predizione ViTRefiner", pred_plot),
             ]
 
+            metrics_values = None
             if target is not None:
-                target_norm = minmax_scale(target, cfg.img_min, cfg.img_max)
+                target_norm = minmax_scale(target, cfg.img_min, cfg.img_max).to(
+                    pred_img.dtype
+                )
+
+                batch_size = pred_img.shape[0]
+
+                def to_bchw_clamped(t: torch.Tensor) -> torch.Tensor:
+                    tensor = t.to(dtype=pred_img.dtype)
+                    while tensor.dim() < 4:
+                        if tensor.dim() == 2:
+                            tensor = tensor.unsqueeze(0).unsqueeze(0)
+                        elif tensor.dim() == 3:
+                            if tensor.shape[0] == batch_size:
+                                tensor = tensor.unsqueeze(1)
+                            else:
+                                tensor = tensor.unsqueeze(0)
+                        else:
+                            tensor = tensor.unsqueeze(0)
+                    return tensor.clamp(0.0, 1.0)
+
+                pred_bchw = to_bchw_clamped(pred_img)
+                target_bchw = to_bchw_clamped(target_norm)
+
+                psnr_value = float(psnr(pred_bchw, target_bchw).reshape(-1)[0].cpu())
+                ssim_value = float(ssim(pred_bchw, target_bchw).reshape(-1)[0].cpu())
+                mae_value = float(F.l1_loss(pred_bchw, target_bchw).cpu())
+
+                metrics_values = {
+                    "psnr": psnr_value,
+                    "ssim": ssim_value,
+                    "mae": mae_value,
+                }
+
                 images.append(("Target", tensor_to_numpy(target_norm)))
             else:
                 st.info("Target non trovato per il file selezionato.")
 
             st.caption(f"File: {sample_label}")
+            if metrics_values is not None:
+                psnr_col, ssim_col, mae_col = st.columns(3)
+                psnr_col.metric("PSNR", f"{metrics_values['psnr']:.2f} dB")
+                ssim_col.metric("SSIM", f"{metrics_values['ssim']:.4f}")
+                mae_col.metric("MAE", f"{metrics_values['mae']:.4f}")
             plot_outputs(images, sinogram=True)
 
             if iter_imgs:
