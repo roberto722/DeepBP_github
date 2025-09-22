@@ -66,7 +66,9 @@ class BackProjectionReconstructorTorch:
         x1 = torch.narrow(x, dim, 1, x.size(dim) - 1)
         x0 = torch.narrow(x, dim, 0, x.size(dim) - 1)
         mid = 0.5 * (x1 + x0) * dt
-        y0 = torch.zeros_like(torch.index_select(x, dim, torch.tensor([0], device=x.device)))
+        y0 = torch.zeros_like(
+            torch.index_select(x, dim, torch.tensor([0], device=x.device, dtype=torch.long))
+        )
         y = torch.cat([y0, torch.cumsum(mid, dim=dim)], dim=dim)
         return y
 
