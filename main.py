@@ -1064,21 +1064,53 @@ def save_side_by_side(
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     def to_uint8(img: torch.Tensor) -> Image.Image:
-        x = img.detach().cpu()
-        if x.dim() == 3 and x.shape[0] == 1:
-            x = x[0]
-        elif x.dim() == 4 and x.shape[0] == 1 and x.shape[1] == 1:
+        x = img.detach()
+
+        # Squeeze singleton batch/channel dimensions while preserving spatial layout
+        if x.dim() == 4 and x.shape[0] == 1 and x.shape[1] == 1:
             x = x[0, 0]
+        elif x.dim() == 3 and x.shape[0] == 1:
+            x = x[0]
         else:
             x = x.squeeze()
 
-        x = x.clamp(0, 1)
-        if vmin is not None or vmax is not None:
-            lo = 0.0 if vmin is None else vmin
-            hi = 1.0 if vmax is None else vmax
-            x = (x - lo) / max(hi - lo, 1e-6)
-            x = x.clamp(0, 1)
-        x = (x * 255.0).round().byte().numpy()  # [H,W]
+        if x.dim() < 2:
+            raise ValueError(f"Expected image-like tensor, got shape {tuple(img.shape)}")
+
+        x = x.to(dtype=torch.float32)
+
+        local_min = local_max = None
+        if vmin is None or vmax is None:
+            finite_mask = torch.isfinite(x)
+            if finite_mask.any():
+                valid = x[finite_mask]
+                local_min, local_max = torch.aminmax(valid)
+            else:
+                # Default to 0-1 range when data is entirely non-finite
+                local_min = torch.tensor(0.0, dtype=x.dtype, device=x.device)
+                local_max = torch.tensor(1.0, dtype=x.dtype, device=x.device)
+
+        if vmin is None:
+            lo = float(local_min.item()) if local_min is not None else 0.0
+        else:
+            lo = float(vmin)
+        if vmax is None:
+            hi = float(local_max.item()) if local_max is not None else lo
+        else:
+            hi = float(vmax)
+
+        if not math.isfinite(lo):
+            lo = 0.0
+        if not math.isfinite(hi):
+            hi = lo
+        if hi - lo < 1e-6:
+            hi = lo + 1e-6
+
+        x = torch.nan_to_num(x, nan=lo, posinf=hi, neginf=lo)
+        x = (x - lo) / (hi - lo)
+        x = x.clamp(0.0, 1.0)
+
+        x = (x * 255.0).round().to(dtype=torch.uint8).cpu().numpy()
         return Image.fromarray(x, mode="L")
 
     panels: List[Image.Image] = []
@@ -1239,6 +1271,8 @@ def validate(
                         img[b],
                         initial_panel,
                         out_path,
+                        vmin=None,
+                        vmax=None,
                         iter_steps=debug_steps,
                     )
                     saved += 1
