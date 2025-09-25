@@ -238,11 +238,13 @@ class FkMigrationLinear(nn.Module):
         per_channel_apodization: bool = False,
         fft_pad: int = 0,
         window: Optional[str] = None,
+        learnable_output_normalization: bool = False,
     ):
         super().__init__()
         self.geom = geom
         self.trainable_apodization = trainable_apodization
         self.per_channel_apodization = per_channel_apodization
+        self.learnable_output_normalization = learnable_output_normalization
 
         if fft_pad is None:
             fft_pad = 0
@@ -291,6 +293,10 @@ class FkMigrationLinear(nn.Module):
             self.apod = nn.Parameter(apod)
         else:
             self.register_buffer("apod", apod)
+
+        if self.learnable_output_normalization:
+            self.output_scale = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+            self.output_shift = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
 
     @staticmethod
     def _build_time_window(window: Optional[str], length: int) -> torch.Tensor:
@@ -404,6 +410,11 @@ class FkMigrationLinear(nn.Module):
         apod_sum = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
         norm = apod_sum.view(1, C, 1, 1) * freq_weight_sum.reshape(1, 1, 1, 1)
         img_mag = img_mag / norm
+
+        if self.learnable_output_normalization:
+            scale = F.softplus(self.output_scale).to(dtype=img_mag.dtype, device=img_mag.device)
+            shift = self.output_shift.to(dtype=img_mag.dtype, device=img_mag.device)
+            img_mag = torch.sigmoid(scale * (img_mag - shift))
 
         return img_mag
 
@@ -1383,6 +1394,7 @@ class TrainConfig:
     beamformer_type: Literal["das", "fk"] = "fk"
     fk_fft_pad: int = 0
     fk_window: Optional[str] = None
+    fk_learnable_output_normalization: bool = False
 
     # ViT refiner
     vit_patch: int = 16
@@ -1458,6 +1470,7 @@ def build_projection_operators(
             per_channel_apodization=False,
             fft_pad=fft_pad,
             window=cfg.fk_window,
+            learnable_output_normalization=cfg.fk_learnable_output_normalization,
         )
         forward_op = ForwardProjectionFk(beamformer)
     else:
