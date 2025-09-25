@@ -1401,7 +1401,7 @@ class TrainConfig:
     vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 4
     lr: float = 2e-4
     num_workers: int = 4
@@ -1414,7 +1414,7 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 7
+    unroll_steps: int = 5
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
 
@@ -1432,7 +1432,7 @@ class TrainConfig:
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
     save_val_images: bool = True
     max_val_images: int = 1
-    val_intermediate_indices: Optional[List[int]] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # steps (0-based, allow negatives) to include when saving val images
+    val_intermediate_indices: Optional[List[int]] = field(default_factory=lambda: [0, 1, 2, 3, 4])  # steps (0-based, allow negatives) to include when saving val images
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
