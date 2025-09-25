@@ -36,6 +36,8 @@ class TrainConfig:
     fk_fft_pad: int = 0
     fk_window: Optional[str] = None
     fk_learnable_output_normalization: bool = False
+    fk_output_normalization_scale: Optional[float] = None
+    fk_output_normalization_shift: Optional[float] = None
 
     # ViT refiner
     vit_patch: int = 16
@@ -125,6 +127,8 @@ def build_projection_operators(
             fft_pad=fft_pad,
             window=cfg.fk_window,
             learnable_output_normalization=cfg.fk_learnable_output_normalization,
+            static_output_scale=cfg.fk_output_normalization_scale,
+            static_output_shift=cfg.fk_output_normalization_shift,
         )
         forward_op = ForwardProjectionFk(beamformer)
     else:

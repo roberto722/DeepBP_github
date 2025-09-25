@@ -22,12 +22,23 @@ class FkMigrationLinear(nn.Module):
         fft_pad: int = 0,
         window: Optional[str] = None,
         learnable_output_normalization: bool = False,
+        static_output_scale: Optional[float] = None,
+        static_output_shift: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.geom = geom
         self.trainable_apodization = trainable_apodization
         self.per_channel_apodization = per_channel_apodization
         self.learnable_output_normalization = learnable_output_normalization
+        self.static_output_scale = static_output_scale
+        self.static_output_shift = static_output_shift
+
+        if self.learnable_output_normalization and (
+            self.static_output_scale is not None or self.static_output_shift is not None
+        ):
+            raise ValueError(
+                "Static output normalization cannot be combined with learnable output normalization."
+            )
 
         if fft_pad is None:
             fft_pad = 0
@@ -193,6 +204,19 @@ class FkMigrationLinear(nn.Module):
             scale = F.softplus(self.output_scale).to(dtype=img_mag.dtype, device=img_mag.device)
             shift = self.output_shift.to(dtype=img_mag.dtype, device=img_mag.device)
             img_mag = torch.sigmoid(scale * (img_mag - shift))
+        else:
+            if self.static_output_shift is not None:
+                shift = torch.as_tensor(
+                    self.static_output_shift, dtype=img_mag.dtype, device=img_mag.device
+                )
+                img_mag = img_mag - shift
+            if self.static_output_scale is not None:
+                scale = torch.as_tensor(
+                    self.static_output_scale, dtype=img_mag.dtype, device=img_mag.device
+                )
+                if torch.any(scale == 0):
+                    raise ValueError("static_output_scale must be non-zero for normalization")
+                img_mag = img_mag / scale
 
         return img_mag
 
