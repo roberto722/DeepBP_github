@@ -189,6 +189,8 @@ class FkMigrationLinear(nn.Module):
         norm = apod_sum.view(1, C, 1, 1) * freq_weight_sum.reshape(1, 1, 1, 1)
         img_mag = img_mag / norm
 
+        # print(f"Min: {img_mag.min()}, Max: {img_mag.max()}")
+
         if self.learnable_output_normalization:
             scale = F.softplus(self.output_scale).to(dtype=img_mag.dtype, device=img_mag.device)
             shift = self.output_shift.to(dtype=img_mag.dtype, device=img_mag.device)
