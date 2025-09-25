@@ -31,6 +31,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         wavelength=cfg.wavelength,
         target_shape=(cfg.n_det, cfg.n_t),
     )
+
     val_ds = HDF5Dataset(
         input_dir,
         target_dir,
@@ -51,6 +52,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
         pin_memory=True,
         drop_last=True,
     )
+    
     val_ld = DataLoader(
         val_ds,
         batch_size=cfg.batch_size,
