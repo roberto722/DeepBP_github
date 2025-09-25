@@ -36,8 +36,8 @@ class TrainConfig:
     fk_fft_pad: int = 0
     fk_window: Optional[str] = None
     fk_learnable_output_normalization: bool = False
-    fk_output_normalization_scale: Optional[float] = None
-    fk_output_normalization_shift: Optional[float] = None
+    fk_output_normalization_scale: Optional[float] = 100
+    fk_output_normalization_shift: Optional[float] = 0
 
     # ViT refiner
     vit_patch: int = 16
@@ -57,7 +57,7 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 7
+    unroll_steps: int = 4
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
 
@@ -75,7 +75,7 @@ class TrainConfig:
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(
-        default_factory=lambda: [0, 1, 2, 3, 4, 5, 6]
+        default_factory=lambda: [0, 1, 2, 3]
     )
 
 
