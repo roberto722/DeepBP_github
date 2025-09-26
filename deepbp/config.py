@@ -68,7 +68,7 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/fk_transformer_fp32_7_unroll"
+    work_dir: str = "./runs/fk_transformer_fp32_7_unroll_normSinos"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
