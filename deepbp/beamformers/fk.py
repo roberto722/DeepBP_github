@@ -111,8 +111,12 @@ class FkMigrationLinear(nn.Module):
             if output_norm_scale_init is not None:
                 if output_norm_scale_init <= 0:
                     raise ValueError("output_norm_scale_init must be positive for softplus inversion")
-                scale_tensor = torch.tensor(output_norm_scale_init, dtype=torch.float32)
-                scale_value = torch.log(torch.expm1(scale_tensor))
+                scale_tensor = torch.tensor(output_norm_scale_init, dtype=torch.float64)
+                if hasattr(torch.special, "softplus_inverse"):
+                    scale_value = torch.special.softplus_inverse(scale_tensor)
+                else:
+                    scale_value = torch.log(torch.expm1(scale_tensor))
+                scale_value = scale_value.to(dtype=torch.float32)
             if output_norm_shift_init is not None:
                 shift_value = float(output_norm_shift_init)
 
