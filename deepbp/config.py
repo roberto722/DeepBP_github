@@ -77,6 +77,8 @@ class TrainConfig:
     val_intermediate_indices: Optional[List[int]] = field(
         default_factory=lambda: [0, 1, 2, 3, 4]
     )
+    resume_training: bool = False
+    resume_checkpoint: Optional[str] = None
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:

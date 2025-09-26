@@ -70,7 +70,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = TrainConfig()
 
-    if os.path.exists(cfg.work_dir):
+    if os.path.exists(cfg.work_dir) and not cfg.resume_training:
         shutil.rmtree(cfg.work_dir)
     os.makedirs(cfg.work_dir, exist_ok=True)
     img_dir = os.path.join(cfg.work_dir, "val_images")
@@ -95,7 +95,30 @@ def main() -> None:
         json.dump(cfg.__dict__, f, indent=2)
 
     best_psnr = -1.0
-    for epoch in range(1, cfg.epochs + 1):
+    start_epoch = 0
+    if cfg.resume_training:
+        checkpoint_path = cfg.resume_checkpoint or os.path.join(cfg.work_dir, "last.pt")
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                "Resume requested but checkpoint file not found: "
+                f"'{checkpoint_path}'. Set TrainConfig.resume_checkpoint to a valid file or disable resume_training."
+            )
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        required_keys = ["model", "optimizer", "scheduler", "epoch"]
+        missing_keys = [key for key in required_keys if key not in checkpoint]
+        if missing_keys:
+            raise KeyError(
+                "Checkpoint is missing required entries for resuming: "
+                + ", ".join(missing_keys)
+            )
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        best_psnr = checkpoint.get("best_psnr", checkpoint.get("val_psnr", -1.0))
+        start_epoch = int(checkpoint["epoch"])
+
+    last_epoch = start_epoch
+    for epoch in range(start_epoch + 1, cfg.epochs + 1):
         tr = train_one_epoch(
             model,
             train_ld,
@@ -143,17 +166,25 @@ def main() -> None:
             torch.save(
                 {
                     "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
                     "epoch": epoch,
+                    "best_psnr": best_psnr,
                     "val_psnr": best_psnr,
                     "config": cfg.__dict__,
                 },
                 os.path.join(cfg.work_dir, "best.pt"),
             )
 
+        last_epoch = epoch
+
     torch.save(
         {
             "model": model.state_dict(),
-            "epoch": cfg.epochs,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": last_epoch,
+            "best_psnr": best_psnr,
             "val_psnr": best_psnr,
             "config": cfg.__dict__,
         },
