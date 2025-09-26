@@ -105,3 +105,21 @@ def test_learnable_output_norm_initialization_from_config() -> None:
 
     assert torch.allclose(initialized_scale, torch.tensor(desired_scale, dtype=torch.float32))
     assert torch.allclose(initialized_shift, torch.tensor(desired_shift, dtype=torch.float32))
+
+
+def test_large_output_norm_scale_init_is_finite() -> None:
+    geom = _make_geometry()
+    desired_scale = torch.tensor(100.0, dtype=torch.float32)
+
+    migration = FkMigrationLinear(
+        geom,
+        learnable_output_normalization=True,
+        output_norm_scale_init=float(desired_scale.item()),
+    )
+
+    stored_scale = migration.output_scale.detach()
+    recovered_scale = F.softplus(stored_scale)
+
+    assert torch.isfinite(stored_scale).all()
+    assert torch.isfinite(recovered_scale).all()
+    assert torch.allclose(recovered_scale, desired_scale, rtol=1e-5, atol=1e-5)
