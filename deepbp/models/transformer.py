@@ -61,6 +61,7 @@ class UnrolledDelayAndSumTransformer(nn.Module):
 
     def forward(self, sino: torch.Tensor):
         x0 = self.beamformer(sino)
+        sino_normalized = self.beamformer.normalize_with_cached_stats(sino)
         xi = x0
         intermediates: List[torch.Tensor] = []
 
@@ -68,8 +69,12 @@ class UnrolledDelayAndSumTransformer(nn.Module):
 
         for _ in range(self.num_steps):
             sino_est = self.forward_operator(xi)
-            sino_residual = sino - sino_est
-            correction = self.beamformer(sino_residual)
+            sino_residual = sino_normalized - sino_est
+            correction = self.beamformer(
+                sino_residual,
+                update_cache=False,
+                pre_normalized=True,
+            )
             xi = xi + weight * correction
             xi = self.vit(xi)
             intermediates.append(xi)

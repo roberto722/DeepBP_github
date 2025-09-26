@@ -206,8 +206,47 @@ class FkMigrationLinear(nn.Module):
 
         return normalized, stats
 
-    def forward(self, sino: torch.Tensor) -> torch.Tensor:
-        """Apply f-k migration to a sinogram of shape [B, C, n_det, n_t]."""
+    def normalize_with_cached_stats(self, sino: torch.Tensor) -> torch.Tensor:
+        """Normalize ``sino`` using the cached statistics without mutating them."""
+
+        if self._cached_norm_stats is None:
+            raise RuntimeError(
+                "Normalization statistics are unavailable; call the beamformer "
+                "on a measured sinogram before requesting cached normalization."
+            )
+
+        normalized, _ = self._normalize_sinogram(
+            sino, stats=self._cached_norm_stats, update_cache=False
+        )
+        return normalized
+
+    def forward(
+        self,
+        sino: torch.Tensor,
+        *,
+        stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        update_cache: bool = True,
+        pre_normalized: bool = False,
+    ) -> torch.Tensor:
+        """Apply f-k migration to a sinogram of shape ``[B, C, n_det, n_t]``.
+
+        Parameters
+        ----------
+        sino:
+            Input sinogram. If ``pre_normalized`` is ``False`` the sinogram will
+            be normalized internally using either the provided ``stats`` or
+            freshly computed statistics.
+        stats:
+            Optional cached normalization statistics to reuse. Ignored when the
+            input is already normalized.
+        update_cache:
+            When ``True`` (default) the internally computed statistics are
+            cached for later reuse. This must be ``False`` when ``stats`` are
+            supplied or when ``pre_normalized`` is ``True``.
+        pre_normalized:
+            If ``True`` the sinogram is assumed to already be normalized and the
+            cached statistics are required to be present.
+        """
 
         B, C, n_det, n_t = sino.shape
         assert n_det == self.geom.n_det and n_t == self.geom.n_t, "Sinogram dims mismatch geometry."
@@ -216,7 +255,22 @@ class FkMigrationLinear(nn.Module):
         device = sino.device
         eps = torch.finfo(dtype).eps
 
-        sino_norm, _ = self._normalize_sinogram(sino, update_cache=True)
+        if pre_normalized:
+            if self._cached_norm_stats is None:
+                raise RuntimeError(
+                    "Cached normalization statistics are required for pre-normalized inputs."
+                )
+            if update_cache:
+                raise ValueError("Cannot update cached stats when input is pre-normalized.")
+            sino_norm = sino
+        else:
+            if stats is None and not update_cache:
+                stats = self._cached_norm_stats
+            sino_norm, stats = self._normalize_sinogram(
+                sino,
+                stats=stats,
+                update_cache=update_cache,
+            )
 
         time_window = self.time_window.to(device=device, dtype=dtype)
         sino_windowed = sino_norm * time_window.view(1, 1, 1, -1)
