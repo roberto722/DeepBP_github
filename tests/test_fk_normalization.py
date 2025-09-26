@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 torch = pytest.importorskip("torch")
+F = pytest.importorskip("torch.nn.functional")
 
 from deepbp.beamformers.fk import FkMigrationLinear, ForwardProjectionFk
 from deepbp.geometry import LinearProbeGeom
@@ -85,3 +86,22 @@ def test_forward_projection_reuses_cached_normalization_stats() -> None:
 
     assert measured.grad is not None
     assert torch.all(torch.isfinite(measured.grad))
+
+
+def test_learnable_output_norm_initialization_from_config() -> None:
+    geom = _make_geometry()
+    desired_scale = 2.5
+    desired_shift = -0.75
+
+    migration = FkMigrationLinear(
+        geom,
+        learnable_output_normalization=True,
+        output_norm_scale_init=desired_scale,
+        output_norm_shift_init=desired_shift,
+    )
+
+    initialized_scale = F.softplus(migration.output_scale.detach())
+    initialized_shift = migration.output_shift.detach()
+
+    assert torch.allclose(initialized_scale, torch.tensor(desired_scale, dtype=torch.float32))
+    assert torch.allclose(initialized_shift, torch.tensor(desired_shift, dtype=torch.float32))

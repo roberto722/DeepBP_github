@@ -24,6 +24,8 @@ class FkMigrationLinear(nn.Module):
         learnable_output_normalization: bool = False,
         static_output_scale: Optional[float] = None,
         static_output_shift: Optional[float] = None,
+        output_norm_scale_init: Optional[float] = None,
+        output_norm_shift_init: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.geom = geom
@@ -103,8 +105,19 @@ class FkMigrationLinear(nn.Module):
             self.register_buffer("apod", apod)
 
         if self.learnable_output_normalization:
-            self.output_scale = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
-            self.output_shift = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+            scale_value = 1.0
+            shift_value = 0.0
+
+            if output_norm_scale_init is not None:
+                if output_norm_scale_init <= 0:
+                    raise ValueError("output_norm_scale_init must be positive for softplus inversion")
+                scale_tensor = torch.tensor(output_norm_scale_init, dtype=torch.float32)
+                scale_value = torch.log(torch.expm1(scale_tensor))
+            if output_norm_shift_init is not None:
+                shift_value = float(output_norm_shift_init)
+
+            self.output_scale = nn.Parameter(torch.tensor(scale_value, dtype=torch.float32))
+            self.output_shift = nn.Parameter(torch.tensor(shift_value, dtype=torch.float32))
 
         self._cached_norm_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
