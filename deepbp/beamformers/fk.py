@@ -1,7 +1,7 @@
 """Frequency-wavenumber migration operators."""
 import math
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -106,6 +106,8 @@ class FkMigrationLinear(nn.Module):
             self.output_scale = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
             self.output_shift = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
 
+        self._cached_norm_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+
     @staticmethod
     def _build_time_window(window: Optional[str], length: int) -> torch.Tensor:
         if length <= 0:
@@ -160,6 +162,50 @@ class FkMigrationLinear(nn.Module):
         phase_y = self.phase_y.to(device=device, dtype=dtype)
         return [phase_x, phase_y]
 
+    def _normalize_sinogram(
+        self,
+        sino: torch.Tensor,
+        stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        update_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Normalize a sinogram using per-sample statistics.
+
+        Parameters
+        ----------
+        sino:
+            Input sinogram of shape ``[B, C, n_det, n_t]``.
+        stats:
+            Optional tuple ``(mean, std)`` computed previously. When provided the
+            sinogram is normalized using these cached statistics.
+        update_cache:
+            If ``True``, cache the computed statistics for later reuse.
+
+        Returns
+        -------
+        normalized, (mean, std)
+            The normalized sinogram along with the statistics that were used.
+        """
+
+        if stats is not None:
+            mean, std = stats
+            centered = sino - mean
+        else:
+            eps = torch.finfo(sino.dtype).eps
+            mean = sino.mean(dim=(-1, -2), keepdim=True)
+            centered = sino - mean
+            var = centered.pow(2).mean(dim=(-1, -2), keepdim=True)
+            std = torch.sqrt(var + eps)
+
+        normalized = centered / std
+
+        if stats is None:
+            stats = (mean, std)
+
+        if update_cache:
+            self._cached_norm_stats = stats
+
+        return normalized, stats
+
     def forward(self, sino: torch.Tensor) -> torch.Tensor:
         """Apply f-k migration to a sinogram of shape [B, C, n_det, n_t]."""
 
@@ -170,11 +216,7 @@ class FkMigrationLinear(nn.Module):
         device = sino.device
         eps = torch.finfo(dtype).eps
 
-        mean = sino.mean(dim=(-1, -2), keepdim=True)
-        sino_norm = sino - mean
-        var = sino_norm.pow(2).mean(dim=(-1, -2), keepdim=True)
-        std = torch.sqrt(var + eps)
-        sino_norm = sino_norm / std
+        sino_norm, _ = self._normalize_sinogram(sino, update_cache=True)
 
         time_window = self.time_window.to(device=device, dtype=dtype)
         sino_windowed = sino_norm * time_window.view(1, 1, 1, -1)
@@ -318,4 +360,11 @@ class ForwardProjectionFk(nn.Module):
         norm = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
         sino = sino / norm.view(1, 1, 1, 1)
 
-        return sino.to(dtype=dtype_in)
+        cached_stats = getattr(self.migration, "_cached_norm_stats", None)
+        sino_norm, _ = self.migration._normalize_sinogram(
+            sino,
+            stats=cached_stats,
+            update_cache=False,
+        )
+
+        return sino_norm.to(dtype=dtype_in)
