@@ -74,6 +74,25 @@ class FkMigrationLinear(nn.Module):
         self.register_buffer("x_coords", xs)
         self.register_buffer("y_coords", ys)
 
+        x_phase_coords = xs - geom.array_x0_m
+        y_phase_coords = ys - geom.array_y_m
+        self.register_buffer("x_phase_coords", x_phase_coords)
+        self.register_buffer("y_phase_coords", y_phase_coords)
+
+        omega_term = (omega / self.geom.c_m_s) ** 2
+        kx_sq = kx ** 2
+        kz_sq = omega_term.view(1, -1) - kx_sq.view(-1, 1)
+        prop_mask = (kz_sq > 0).to(dtype=torch.float32)
+        kz_sq = torch.clamp(kz_sq, min=0.0)
+        kz = torch.sqrt(kz_sq)
+        phase_x = torch.exp(1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1)))
+        phase_y = torch.exp(1j * (y_phase_coords.view(-1, 1, 1) * kz.view(1, geom.n_det, -1)))
+
+        self.register_buffer("prop_mask", prop_mask)
+        self.register_buffer("kz", kz)
+        self.register_buffer("phase_x", phase_x.to(dtype=torch.complex64))
+        self.register_buffer("phase_y", phase_y.to(dtype=torch.complex64))
+
         win = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(geom.n_det) / max(geom.n_det - 1, 1))
         apod = torch.from_numpy(win.astype(np.float32))
         if per_channel_apodization:
@@ -132,6 +151,15 @@ class FkMigrationLinear(nn.Module):
             apod = apod.clamp_min(torch.finfo(apod.dtype).tiny)
         return apod
 
+    def get_phase_matrices(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> List[torch.Tensor]:
+        """Return cached phase matrices converted to the requested dtype/device."""
+
+        phase_x = self.phase_x.to(device=device, dtype=dtype)
+        phase_y = self.phase_y.to(device=device, dtype=dtype)
+        return [phase_x, phase_y]
+
     def forward(self, sino: torch.Tensor) -> torch.Tensor:
         """Apply f-k migration to a sinogram of shape [B, C, n_det, n_t]."""
 
@@ -159,41 +187,20 @@ class FkMigrationLinear(nn.Module):
         spec_fk = torch.fft.fft(spec_t, dim=2)
 
         real_dtype = spec_fk.real.dtype
-        omega = self.omega.to(device=device, dtype=real_dtype)
-        kx = self.kx.to(device=device, dtype=real_dtype)
-
-        omega_term = (omega / self.geom.c_m_s) ** 2
-        kx_sq = kx ** 2
-
-        kz_sq = omega_term.view(1, 1, 1, -1) - kx_sq.view(1, 1, -1, 1)
-        kz_sq = torch.clamp(kz_sq, min=0.0)
-        kz = torch.sqrt(kz_sq)
-        prop_mask = (kz_sq > 0).to(spec_fk.dtype)
-
         freq_weight = self.freq_weight.to(device=device, dtype=real_dtype)
         freq_weight_sum = torch.clamp(self.freq_weight_sum.to(device=device, dtype=dtype), min=eps)
         freq_weight = freq_weight.view(1, 1, 1, -1).to(dtype=spec_fk.dtype)
 
-        spec_fk = spec_fk * prop_mask
+        prop_mask = self.prop_mask.to(device=device, dtype=spec_fk.dtype)
+        spec_fk = spec_fk * prop_mask.view(1, 1, self.geom.n_det, -1)
 
-        x_phase_coords = (self.x_coords - self.geom.array_x0_m).to(device=device, dtype=real_dtype)
-        y_phase_coords = (self.y_coords - self.geom.array_y_m).to(device=device, dtype=real_dtype)
-        phase_x = torch.exp(1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1)))
-        phase_x = phase_x.to(dtype=spec_fk.dtype)
+        phase_x, phase_y = self.get_phase_matrices(device, spec_fk.dtype)
+        weighted_spec = spec_fk * freq_weight
+        band = torch.einsum("bcdw,ydw->bcyd", weighted_spec, phase_y)
+        band = band.reshape(B * C * self.geom.ny, self.geom.n_det)
+        img_complex = torch.matmul(band, phase_x)
+        img_complex = img_complex.view(B, C, self.geom.ny, self.geom.nx)
 
-        kz = kz.to(dtype=spec_fk.real.dtype)
-        lines: List[torch.Tensor] = []
-        for y_val in y_phase_coords:
-            phase_y = torch.exp(1j * (kz * y_val))
-            phase_y = phase_y.to(dtype=spec_fk.dtype)
-            weighted = spec_fk * phase_y * freq_weight
-            band = weighted.sum(dim=-1)
-            band = band.reshape(B * C, self.geom.n_det)
-            line = torch.matmul(band, phase_x)
-            line = line.view(B, C, self.geom.nx)
-            lines.append(line)
-
-        img_complex = torch.stack(lines, dim=2)
         img_mag = img_complex.abs().to(dtype)
 
         apod_sum = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
@@ -276,38 +283,22 @@ class ForwardProjectionFk(nn.Module):
 
         device = img.device
 
-        kx = self.migration.kx.to(device=device, dtype=working_dtype)
-        omega = self.migration.omega.to(device=device, dtype=working_dtype)
-        x_coords = self.migration.x_coords.to(device=device, dtype=working_dtype)
-        y_coords = self.migration.y_coords.to(device=device, dtype=working_dtype)
+        phase_x_cache, phase_y_cache = self.migration.get_phase_matrices(device, complex_dtype)
 
-        x_phase_coords = x_coords - self.geom.array_x0_m
-        y_phase_coords = y_coords - self.geom.array_y_m
-
-        n_kx = kx.numel()
-        n_freq = omega.numel()
+        n_kx = phase_x_cache.shape[0]
+        n_freq = phase_y_cache.shape[-1]
 
         img_line = img[:, 0, :, :].to(dtype=working_dtype)
-        phase_x = torch.exp(
-            -1j * (kx.view(-1, 1) * x_phase_coords.view(1, -1))
-        ).to(dtype=complex_dtype)
+        phase_x = torch.conj(phase_x_cache).transpose(0, 1)
         img_line_flat = img_line.reshape(B * ny, nx)
-        img_fft = torch.matmul(
-            img_line_flat.to(dtype=complex_dtype), phase_x.transpose(0, 1)
-        )
+        img_fft = torch.matmul(img_line_flat.to(dtype=complex_dtype), phase_x)
         img_fft = img_fft.view(B, ny, n_kx)
         dx = torch.as_tensor(self.geom.dx_m, device=device, dtype=working_dtype)
         img_fft = img_fft.to(dtype=complex_dtype) * dx.to(dtype=complex_dtype)
 
-        omega_term = (omega / self.geom.c_m_s) ** 2
-        kx_sq = kx ** 2
-        kz_sq = omega_term.view(1, -1) - kx_sq.view(-1, 1)
-        prop_mask = kz_sq > 0
-        kz = torch.sqrt(torch.clamp(kz_sq, min=0.0))
-        phase = y_phase_coords.view(ny, 1, 1) * kz.view(1, n_kx, n_freq)
-        phase_y = torch.exp(-1j * phase)
-        phase_y = phase_y.to(dtype=complex_dtype)
-        phase_y = phase_y * prop_mask.view(1, n_kx, n_freq).to(dtype=complex_dtype)
+        prop_mask = self.migration.prop_mask.to(device=device, dtype=complex_dtype)
+        phase_y = torch.conj(phase_y_cache)
+        phase_y = phase_y * prop_mask.view(1, n_kx, n_freq)
 
         img_fft = img_fft.unsqueeze(1)
         spec_fk = torch.einsum("bcyk,ykf->bckf", img_fft, phase_y)
