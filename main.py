@@ -95,6 +95,7 @@ def main() -> None:
         json.dump(cfg.__dict__, f, indent=2)
 
     best_psnr = -1.0
+    best_epoch = 0
     start_epoch = 0
     if cfg.resume_training:
         checkpoint_path = cfg.resume_checkpoint or os.path.join(cfg.work_dir, "last.pt")
@@ -115,6 +116,7 @@ def main() -> None:
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         best_psnr = checkpoint.get("best_psnr", checkpoint.get("val_psnr", -1.0))
+        best_epoch = int(checkpoint.get("best_epoch", checkpoint.get("epoch", 0)))
         start_epoch = int(checkpoint["epoch"])
 
     last_epoch = start_epoch
@@ -146,6 +148,25 @@ def main() -> None:
 
         scheduler.step()
 
+        if val["psnr"] > best_psnr:
+            best_psnr = val["psnr"]
+            best_epoch = epoch
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "epoch": epoch,
+                    "best_psnr": best_psnr,
+                    "val_psnr": best_psnr,
+                    "best_epoch": best_epoch,
+                    "config": cfg.__dict__,
+                },
+                os.path.join(cfg.work_dir, "best.pt"),
+            )
+
+        last_epoch = epoch
+
         log = {
             "epoch": epoch,
             "train_psnr": tr["psnr"],
@@ -158,25 +179,13 @@ def main() -> None:
             "val_weighted_l1": val["weighted_l1"],
             "val_masked_ssim": val.get("masked_ssim"),
             "lr": scheduler.get_last_lr()[0],
+            "best_epoch": best_epoch,
         }
         print(json.dumps(log, indent=2))
 
-        if val["psnr"] > best_psnr:
-            best_psnr = val["psnr"]
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "epoch": epoch,
-                    "best_psnr": best_psnr,
-                    "val_psnr": best_psnr,
-                    "config": cfg.__dict__,
-                },
-                os.path.join(cfg.work_dir, "best.pt"),
-            )
-
-        last_epoch = epoch
+        log_path = os.path.join(cfg.work_dir, "training_log.jsonl")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log) + "\n")
 
     torch.save(
         {
@@ -186,6 +195,7 @@ def main() -> None:
             "epoch": last_epoch,
             "best_psnr": best_psnr,
             "val_psnr": best_psnr,
+            "best_epoch": best_epoch,
             "config": cfg.__dict__,
         },
         os.path.join(cfg.work_dir, "last.pt"),
