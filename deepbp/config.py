@@ -33,17 +33,17 @@ class TrainConfig:
     wavelength: int = 800
     trainable_apodization: bool = True
     beamformer_type: Literal["das", "fk"] = "fk"
-    fk_fft_pad: int = 0
+    fk_fft_pad: int = 20
     fk_window: Optional[str] = None
-    fk_learnable_output_normalization: bool = True
-    fk_output_normalization_scale: Optional[float] = None
-    fk_output_normalization_shift: Optional[float] = None
-    fk_output_norm_scale_init: Optional[float] = 100
-    fk_output_norm_shift_init: Optional[float] = 0
+    fk_learnable_output_normalization: bool = False
+    fk_output_normalization_scale: Optional[float] = 100
+    fk_output_normalization_shift: Optional[float] = 0
+    fk_output_norm_scale_init: Optional[float] = None
+    fk_output_norm_shift_init: Optional[float] = None
 
     # ViT refiner
-    vit_patch: int = 8
-    vit_stride: Optional[int] = None
+    vit_patch: int = 16
+    vit_stride: Optional[int] = 8
 
     # Training
     epochs: int = 100
@@ -70,7 +70,7 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/fk_transformer_fp32_7_unroll_normSinos_learn_normFK"
+    work_dir: str = "./runs/fk_transformer_fp32_5_fftPad_20"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
