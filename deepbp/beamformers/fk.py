@@ -244,6 +244,7 @@ class FkMigrationLinear(nn.Module):
         stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         update_cache: bool = True,
         pre_normalized: bool = False,
+        return_magnitude: bool = True,
     ) -> torch.Tensor:
         """Apply f-k migration to a sinogram of shape ``[B, C, n_det, n_t]``.
 
@@ -263,6 +264,11 @@ class FkMigrationLinear(nn.Module):
         pre_normalized:
             If ``True`` the sinogram is assumed to already be normalized and the
             cached statistics are required to be present.
+        return_magnitude:
+            When ``True`` (default) the magnitude of the complex image is
+            returned. Setting this to ``False`` returns the signed real component
+            of the image, which is useful for residual corrections where the
+            contribution may be positive or negative.
         """
 
         B, C, n_det, n_t = sino.shape
@@ -314,33 +320,38 @@ class FkMigrationLinear(nn.Module):
         img_complex = torch.matmul(band, phase_x)
         img_complex = img_complex.view(B, C, self.geom.ny, self.geom.nx)
 
-        img_mag = img_complex.abs().to(dtype)
+        if return_magnitude:
+            img_out = img_complex.abs()
+        else:
+            img_out = img_complex.real
+        img_out = img_out.to(dtype)
 
         apod_sum = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
         norm = apod_sum.view(1, C, 1, 1) * freq_weight_sum.reshape(1, 1, 1, 1)
-        img_mag = img_mag / norm
+        img_out = img_out / norm
 
-        # print(f"Min: {img_mag.min()}, Max: {img_mag.max()}")
+        # print(f"Min: {img_out.min()}, Max: {img_out.max()}")
 
-        if self.learnable_output_normalization:
-            scale = F.softplus(self.output_scale).to(dtype=img_mag.dtype, device=img_mag.device)
-            shift = self.output_shift.to(dtype=img_mag.dtype, device=img_mag.device)
-            img_mag = torch.sigmoid(scale * (img_mag - shift))
-        else:
-            if self.static_output_shift is not None:
-                shift = torch.as_tensor(
-                    self.static_output_shift, dtype=img_mag.dtype, device=img_mag.device
-                )
-                img_mag = img_mag - shift
-            if self.static_output_scale is not None:
-                scale = torch.as_tensor(
-                    self.static_output_scale, dtype=img_mag.dtype, device=img_mag.device
-                )
-                if torch.any(scale == 0):
-                    raise ValueError("static_output_scale must be non-zero for normalization")
-                img_mag = img_mag / scale
+        if return_magnitude:
+            if self.learnable_output_normalization:
+                scale = F.softplus(self.output_scale).to(dtype=img_out.dtype, device=img_out.device)
+                shift = self.output_shift.to(dtype=img_out.dtype, device=img_out.device)
+                img_out = torch.sigmoid(scale * (img_out - shift))
+            else:
+                if self.static_output_shift is not None:
+                    shift = torch.as_tensor(
+                        self.static_output_shift, dtype=img_out.dtype, device=img_out.device
+                    )
+                    img_out = img_out - shift
+                if self.static_output_scale is not None:
+                    scale = torch.as_tensor(
+                        self.static_output_scale, dtype=img_out.dtype, device=img_out.device
+                    )
+                    if torch.any(scale == 0):
+                        raise ValueError("static_output_scale must be non-zero for normalization")
+                    img_out = img_out / scale
 
-        return img_mag
+        return img_out
 
 
 class ForwardProjectionFk(nn.Module):
