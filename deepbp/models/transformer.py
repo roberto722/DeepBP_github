@@ -74,6 +74,7 @@ class UnrolledDelayAndSumTransformer(nn.Module):
                 sino_residual,
                 update_cache=False,
                 pre_normalized=True,
+                return_magnitude=False,
             )
             xi = xi + weight * correction
             xi = self.vit(xi)

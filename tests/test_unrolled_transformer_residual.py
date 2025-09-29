@@ -67,3 +67,33 @@ def test_unrolled_residual_matches_forward_projection_variance() -> None:
     # Residual variance should stay within a small factor of the projection variance.
     assert torch.all(ratio > 0.1)
     assert torch.all(ratio < 10.0)
+
+
+def test_beamformer_residual_returns_signed_output() -> None:
+    geom = _make_geometry()
+    beamformer = FkMigrationLinear(geom)
+
+    torch.manual_seed(0)
+    sino = torch.randn(1, 1, geom.n_det, geom.n_t)
+
+    # Prime normalization statistics.
+    _ = beamformer(sino)
+    sino_norm = beamformer.normalize_with_cached_stats(sino)
+    sino_residual = sino_norm - sino_norm.mean()
+
+    correction_signed = beamformer(
+        sino_residual,
+        update_cache=False,
+        pre_normalized=True,
+        return_magnitude=False,
+    )
+
+    correction_mag = beamformer(
+        sino_residual,
+        update_cache=False,
+        pre_normalized=True,
+    )
+
+    assert torch.all(correction_mag >= 0)
+    assert torch.any(correction_signed < 0)
+    assert torch.any(correction_signed > 0)
