@@ -69,11 +69,13 @@ class TrainConfig:
     img_min: float = 0.0
     img_max: float = 316.9658
 
-    # Paths
+    # Paths / dataset
     work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"
+    dataset_type: Literal["hdf5", "voc"] = "hdf5"
+    """Dataset backend to use for loading sinograms/reconstructions."""
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(

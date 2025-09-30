@@ -8,7 +8,7 @@ from typing import Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import HDF5Dataset
+from dataset import HDF5Dataset, VOCDataset
 from deepbp.config import TrainConfig, create_model
 from deepbp.training import train_one_epoch, validate
 from deepbp.utils import seed_everything
@@ -17,32 +17,60 @@ from deepbp.utils import seed_everything
 def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
     """Instantiate training and validation dataloaders based on the configuration."""
 
+    dataset_type = cfg.dataset_type.lower()
     input_dir = os.path.join(cfg.data_root, cfg.sino_dir)
-    target_dir = os.path.join(cfg.data_root, cfg.recs_dir)
 
-    train_ds = HDF5Dataset(
-        input_dir,
-        target_dir,
-        cfg.sino_min,
-        cfg.sino_max,
-        cfg.img_min,
-        cfg.img_max,
-        split="train",
-        wavelength=cfg.wavelength,
-        target_shape=(cfg.n_det, cfg.n_t),
-    )
+    if dataset_type == "hdf5":
+        target_dir = os.path.join(cfg.data_root, cfg.recs_dir)
 
-    val_ds = HDF5Dataset(
-        input_dir,
-        target_dir,
-        cfg.sino_min,
-        cfg.sino_max,
-        cfg.img_min,
-        cfg.img_max,
-        split="val",
-        wavelength=cfg.wavelength,
-        target_shape=(cfg.n_det, cfg.n_t),
-    )
+        train_ds = HDF5Dataset(
+            input_dir,
+            target_dir,
+            cfg.sino_min,
+            cfg.sino_max,
+            cfg.img_min,
+            cfg.img_max,
+            split="train",
+            wavelength=cfg.wavelength,
+            target_shape=(cfg.n_det, cfg.n_t),
+        )
+
+        val_ds = HDF5Dataset(
+            input_dir,
+            target_dir,
+            cfg.sino_min,
+            cfg.sino_max,
+            cfg.img_min,
+            cfg.img_max,
+            split="val",
+            wavelength=cfg.wavelength,
+            target_shape=(cfg.n_det, cfg.n_t),
+        )
+    elif dataset_type == "voc":
+        train_ds = VOCDataset(
+            input_dir,
+            cfg.sino_min,
+            cfg.sino_max,
+            cfg.img_min,
+            cfg.img_max,
+            split="train",
+            target_shape=(cfg.n_det, cfg.n_t),
+        )
+
+        val_ds = VOCDataset(
+            input_dir,
+            cfg.sino_min,
+            cfg.sino_max,
+            cfg.img_min,
+            cfg.img_max,
+            split="val",
+            target_shape=(cfg.n_det, cfg.n_t),
+        )
+    else:
+        supported = ("hdf5", "voc")
+        raise ValueError(
+            f"Unsupported dataset_type '{cfg.dataset_type}'. Expected one of: {', '.join(supported)}."
+        )
 
     train_ld = DataLoader(
         train_ds,
