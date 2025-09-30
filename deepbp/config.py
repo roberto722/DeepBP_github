@@ -43,17 +43,17 @@ class TrainConfig:
 
     # ViT refiner
     vit_patch: int = 16
-    vit_stride: Optional[int] = 8
+    vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 100
+    epochs: int = 200
     batch_size: int = 8
     lr: float = 2e-4
     num_workers: int = 4
-    clip_grad: float = 1.0
+    clip_grad: float = 100.0
     use_tqdm: bool = True
-    weight_alpha: float = 1.0
-    weight_threshold: Optional[float] = 0.5
+    weight_alpha: float = 0
+    weight_threshold: Optional[float] = None
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
 
@@ -70,7 +70,7 @@ class TrainConfig:
     img_max: float = 316.9658
 
     # Paths
-    work_dir: str = "./runs/fk_transformer_fp32_5_fftPad_20"
+    work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"

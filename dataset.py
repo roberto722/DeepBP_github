@@ -6,10 +6,9 @@ import torch
 import torch.nn.functional as F
 import nibabel as nib
 from torch.utils.data import Dataset
-
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use("Agg")
+# import matplotlib
+# matplotlib.use("Agg")
 
 nib.imageglobals.logger.setLevel(40)
 
@@ -88,6 +87,48 @@ def load_hdf5_sample(
     return sinogram, target
 
 
+def load_nifti_sample(
+    input_path: str,
+    target_dir: str,
+    target_shape: Tuple[int, int],
+    sino_min: float,
+    sino_max: float,
+    img_min: float,
+    img_max: float,
+    apply_normalization: bool = True,
+    require_target: bool = True,
+):
+    """Load a single sinogram/target pair applying the dataset preprocessing pipeline."""
+    sinogram_nifti = nib.load(input_path)
+    sinogram_np = sinogram_nifti.get_fdata().astype('float32')
+    if sinogram_np.ndim == 2:
+        sinogram = torch.tensor(sinogram_nifti).unsqueeze(0)
+    else:
+        sinogram = torch.tensor(sinogram_nifti)
+
+    target = None
+    if os.path.exists(target_dir):
+        target_nifti = nib.load(target_dir)
+        target_np = target_nifti.get_fdata().astype('float32')
+        if target_np.ndim == 2:
+            target = torch.tensor(target_np).unsqueeze(0)
+        else:
+            target = torch.tensor(target_np)
+    elif require_target:
+        raise FileNotFoundError(f"Target file not found: {target_dir}")
+
+    #sinogram = torch.flip(sinogram, dims=[1])
+
+    if apply_normalization:
+        sinogram = minmax_scale(sinogram, sino_min, sino_max)
+        if target is not None:
+            target = minmax_scale(target, img_min, img_max)
+            # plt.imshow(target[0, :, :], cmap='gray')
+            # plt.show()
+
+    return sinogram, target
+
+
 class HDF5Dataset(Dataset):
     def __init__(self, input_dir, target_dir, sino_min: float, sino_max: float, img_min: float, img_max: float, split='train', wavelength=800, target_shape=(128, 1640)):
         super().__init__()
@@ -112,6 +153,44 @@ class HDF5Dataset(Dataset):
             input_path=input_path,
             target_dir=self.target_dir,
             wavelength=self.wavelength,
+            target_shape=self.target_shape,
+            sino_min=self.smin,
+            sino_max=self.smax,
+            img_min=self.imin,
+            img_max=self.imax,
+            apply_normalization=True,
+            require_target=True,
+        )
+
+        return sinogram, target
+
+class VOCDataset(Dataset):
+    def __init__(self, input_dir, sino_min: float, sino_max: float, img_min: float, img_max: float, split='train', target_shape=(128, 1640)):
+        super().__init__()
+        if split == 'test':
+            self.sino_dir = input_dir + "/tst/" + split + "/sinograms"
+            self.target_dir = input_dir + "/tst/" + split + "/rec_images"
+        else:
+            self.sino_dir = input_dir + "/trn_val/" + split + "/sinograms"
+            self.target_dir = input_dir + "/trn_val/" + split + "/rec_images"
+        self.smin, self.smax = float(sino_min), float(sino_max)
+        self.imin, self.imax = float(img_min), float(img_max)
+        self.file_list = sorted([
+            os.path.join(self.sino_dir, f)
+            for f in os.listdir(self.sino_dir)
+            if f.endswith('.nii')
+        ])
+        self.target_shape = target_shape
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        input_path = self.file_list[idx]
+        target_path = self.file_list[idx].replace("sinogram", "rec_img_L1_shearlet_e-05")
+        sinogram, target = load_nifti_sample(
+            input_path=input_path,
+            target_dir=target_path,
             target_shape=self.target_shape,
             sino_min=self.smin,
             sino_max=self.smax,
