@@ -261,7 +261,13 @@ def main():
                 require_target=False,
             )
 
-            sino_norm, initial_img, pred_img, iter_imgs = run_inference_steps(
+            (
+                sino_norm,
+                initial_img,
+                pred_img,
+                iter_imgs,
+                beamformer_stack,
+            ) = run_inference_steps(
                 model,
                 sinogram_raw,
                 cfg,
@@ -360,6 +366,12 @@ def main():
                 )
             else:
                 st.info("Il modello non restituisce step intermedi da visualizzare.")
+
+            if beamformer_stack is not None and beamformer_stack.shape[1] > 1:
+                st.info(
+                    "Il beamformer ha fornito più canali. È possibile ispezionare tutte le feature "
+                    "dalla variabile `beamformer_stack`."
+                )
         except Exception as exc:
             st.error(f"Errore durante l'elaborazione: {exc}")
         finally:
