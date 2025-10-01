@@ -36,7 +36,7 @@ def _variance(x: torch.Tensor) -> torch.Tensor:
 
 def test_unrolled_residual_matches_forward_projection_variance() -> None:
     geom = _make_geometry()
-    beamformer = FkMigrationLinear(geom)
+    beamformer = FkMigrationLinear(geom, output_components=("magnitude", "real"))
     forward = ForwardProjectionFk(beamformer)
 
     model = UnrolledDelayAndSumTransformer(
@@ -51,7 +51,12 @@ def test_unrolled_residual_matches_forward_projection_variance() -> None:
     torch.manual_seed(42)
     sino = torch.randn(1, 1, geom.n_det, geom.n_t)
 
-    _, x0, _ = model(sino)
+    out, x0, intermediates = model(sino)
+
+    assert getattr(beamformer, "default_output_channels", 1) == 2
+    assert out.shape[1] == 1
+    assert x0.shape[1] == 1
+    assert len(intermediates) == 1 and intermediates[0].shape[1] == 1
 
     sino_normalized = beamformer.normalize_with_cached_stats(sino)
     sino_est = forward(x0)

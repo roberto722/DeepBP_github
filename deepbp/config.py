@@ -40,6 +40,7 @@ class TrainConfig:
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
+    fk_output_components: Tuple[str, ...] = ("magnitude",)
 
     # ViT refiner
     vit_patch: int = 16
@@ -137,6 +138,7 @@ def build_projection_operators(
             static_output_shift=cfg.fk_output_normalization_shift,
             output_norm_scale_init=cfg.fk_output_norm_scale_init,
             output_norm_shift_init=cfg.fk_output_norm_shift_init,
+            output_components=cfg.fk_output_components,
         )
         forward_op = ForwardProjectionFk(beamformer)
     else:
@@ -157,8 +159,9 @@ def create_model(cfg: TrainConfig, device: torch.device) -> torch.nn.Module:
     )
 
     vit_stride = cfg.vit_stride if cfg.vit_stride is not None else cfg.vit_patch
+    vit_in_ch = getattr(beamformer, "default_output_channels", 1)
     vit = ViTRefiner(
-        in_ch=1,
+        in_ch=vit_in_ch,
         embed_dim=256,
         patch=cfg.vit_patch,
         stride=vit_stride,
