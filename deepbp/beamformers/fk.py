@@ -439,10 +439,16 @@ class ForwardProjectionFk(nn.Module):
         return self.migration.get_apodization(dtype, device, channels)
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
-        """Project an image into the sinogram domain using the f-k model."""
+        """Project an image into the sinogram domain using the f-k model.
+
+        Notes
+        -----
+        Only the first channel of ``img`` is used for the physical projection.
+        Any additional channels are propagated unchanged through data-consistency
+        operations performed outside this module.
+        """
 
         B, C, ny, nx = img.shape
-        assert C == 1, "Expect image with a single channel."
         assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
 
         if (
