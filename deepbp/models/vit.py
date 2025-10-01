@@ -75,7 +75,13 @@ class TransformerEncoder(nn.Module):
 class PatchDecoder(nn.Module):
     """Decode token features on the patch grid with local convolutions."""
 
-    def __init__(self, embed_dim: int, patch_area: int, num_blocks: int = 3) -> None:
+    def __init__(
+        self,
+        embed_dim: int,
+        patch_area: int,
+        out_channels: int,
+        num_blocks: int = 3,
+    ) -> None:
         super().__init__()
         if num_blocks < 1:
             raise ValueError("PatchDecoder requires at least one convolutional block")
@@ -85,7 +91,9 @@ class PatchDecoder(nn.Module):
             layers.append(nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1))
             layers.append(nn.GELU())
         self.layers = nn.Sequential(*layers)
-        self.proj = nn.Conv2d(embed_dim, patch_area, kernel_size=3, padding=1)
+        self.proj = nn.Conv2d(embed_dim, patch_area * out_channels, kernel_size=3, padding=1)
+        self.out_channels = out_channels
+        self.patch_area = patch_area
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
@@ -139,9 +147,10 @@ class ViTRefiner(nn.Module):
         self.grid_size: Optional[Tuple[int, int]] = None
         self.encoder = TransformerEncoder(embed_dim, depth, heads, mlp_ratio, p_drop)
         self.patch_area = self.patch_size[0] * self.patch_size[1]
-        self.token_decoder = PatchDecoder(embed_dim, self.patch_area, num_blocks=3)
+        self.in_ch = in_ch
+        self.token_decoder = PatchDecoder(embed_dim, self.patch_area, in_ch, num_blocks=3)
         fusion_hidden = max(embed_dim // 8, 16)
-        self.local_fusion = LocalFusionBlock(in_channels=1, hidden_channels=fusion_hidden)
+        self.local_fusion = LocalFusionBlock(in_channels=in_ch, hidden_channels=fusion_hidden)
         self.register_buffer("fold_weight", torch.empty(0), persistent=False)
         self._fold_weight_shape: Optional[Tuple[int, int]] = None
         self._fold_weight_stride: Optional[Tuple[int, int]] = None
@@ -219,13 +228,14 @@ class ViTRefiner(nn.Module):
         z = self.encoder(z)
         z = z.transpose(1, 2).reshape(B, D, Hp, Wp)
         pixels = self.token_decoder(z)
-        pixels = pixels.reshape(B, self.patch_area, Hp * Wp)
+        pixels = pixels.reshape(B, self.in_ch * self.patch_area, Hp * Wp)
         img = F.fold(
             pixels,
             output_size=(H, W),
             kernel_size=self.patch_size,
             stride=stride_hw,
         )
+        img = img.view(B, self.in_ch, H, W)
         norm = self._get_fold_weight((H, W), stride_hw, x.device, x.dtype)
         img = img / norm.clamp_min(1.0)
         img = self.local_fusion(img)
