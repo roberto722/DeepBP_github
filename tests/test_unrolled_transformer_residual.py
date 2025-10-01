@@ -102,3 +102,26 @@ def test_beamformer_residual_returns_signed_output() -> None:
     assert torch.all(correction_mag >= 0)
     assert torch.any(correction_signed < 0)
     assert torch.any(correction_signed > 0)
+
+
+def test_forward_projection_fk_supports_multichannel_input() -> None:
+    geom = _make_geometry()
+    beamformer = FkMigrationLinear(geom)
+    forward = ForwardProjectionFk(beamformer)
+
+    torch.manual_seed(1)
+    img = torch.randn(2, 3, geom.ny, geom.nx, requires_grad=True)
+
+    sino = forward(img)
+
+    assert sino.shape == (2, 1, geom.n_det, geom.n_t)
+
+    loss = sino.square().sum()
+    loss.backward()
+
+    assert img.grad is not None
+    grad_primary = img.grad[:, 0]
+    grad_aux = img.grad[:, 1:]
+
+    assert torch.any(grad_primary != 0)
+    assert torch.all(grad_aux == 0)
