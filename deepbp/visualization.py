@@ -16,19 +16,20 @@ def save_side_by_side(
     vmax: Optional[float] = None,
     iter_steps: Optional[List[Tuple[int, torch.Tensor]]] = None,
 ) -> None:
-    """Save a side-by-side image [Initial | intermediates | Pred | GT]."""
+    """Save a side-by-side image [Initial | intermediates | Pred | GT].
+
+    When tensors contain multiple channels, the first channel is used for visualization.
+    """
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     def to_uint8(img: torch.Tensor) -> Image.Image:
         x = img.detach()
 
-        if x.dim() == 4 and x.shape[0] == 1 and x.shape[1] == 1:
-            x = x[0, 0]
-        elif x.dim() == 3 and x.shape[0] == 1:
+        while x.dim() > 2:
+            if x.size(0) == 0:
+                raise ValueError("Cannot visualize an empty tensor")
             x = x[0]
-        else:
-            x = x.squeeze()
 
         if x.dim() < 2:
             raise ValueError(f"Expected image-like tensor, got shape {tuple(img.shape)}")
