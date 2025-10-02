@@ -36,7 +36,7 @@ class TrainConfig:
     fk_fft_pad: int = 20
     fk_window: Optional[str] = None
     fk_learnable_output_normalization: bool = False
-    fk_output_normalization_scale: Optional[float] = 100
+    fk_output_normalization_scale: Optional[float] = 1
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
@@ -65,17 +65,22 @@ class TrainConfig:
     learnable_data_consistency_weight: bool = True
 
     # Global scaling (per-domain)
-    sino_min: float = -11.0322
-    sino_max: float = 12.5394
+    # sino_min: float = -11.0322
+    # sino_max: float = 12.5394
+    # img_min: float = 0.0
+    # img_max: float = 316.9658
+
+    sino_min: float = -1
+    sino_max: float = 1
     img_min: float = 0.0
-    img_max: float = 316.9658
+    img_max: float = 1.5
 
     # Paths / dataset
     work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
-    sino_dir: str = "Forearm2000_hdf5/train_val_tst"
-    recs_dir: str = "Forearm2000_recs/L1_Shearlet"
-    dataset_type: Literal["hdf5", "voc"] = "hdf5"
+    sino_dir: str = "E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000" # "Forearm2000_hdf5/train_val_tst"
+    recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
+    dataset_type: Literal["hdf5", "voc"] = "voc"
     """Dataset backend to use for loading sinograms/reconstructions."""
     save_val_images: bool = True
     max_val_images: int = 1

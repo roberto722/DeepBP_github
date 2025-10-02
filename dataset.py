@@ -83,6 +83,8 @@ def load_hdf5_sample(
             target = minmax_scale(target, img_min, img_max)
             # plt.imshow(target[0, :, :], cmap='gray')
             # plt.show()
+            # plt.imshow(sinogram[0, :, :].detach().cpu().numpy())
+            # plt.show()
 
     return sinogram, target
 
@@ -102,9 +104,14 @@ def load_nifti_sample(
     sinogram_nifti = nib.load(input_path)
     sinogram_np = sinogram_nifti.get_fdata().astype('float32')
     if sinogram_np.ndim == 2:
-        sinogram = torch.tensor(sinogram_nifti).unsqueeze(0)
+        sinogram = torch.tensor(sinogram_np)
     else:
-        sinogram = torch.tensor(sinogram_nifti)
+        sinogram = torch.tensor(sinogram_np).squeeze()
+
+    sinogram = torch.transpose(sinogram, dim0=0, dim1=1)
+    sinogram = pad_or_crop_sinogram(sinogram, target_shape).unsqueeze(0)
+
+    sinogram = torch.flip(sinogram, dims=[1])
 
     target = None
     if os.path.exists(target_dir):
@@ -117,7 +124,7 @@ def load_nifti_sample(
     elif require_target:
         raise FileNotFoundError(f"Target file not found: {target_dir}")
 
-    #sinogram = torch.flip(sinogram, dims=[1])
+
 
     if apply_normalization:
         sinogram = minmax_scale(sinogram, sino_min, sino_max)
@@ -125,7 +132,8 @@ def load_nifti_sample(
             target = minmax_scale(target, img_min, img_max)
             # plt.imshow(target[0, :, :], cmap='gray')
             # plt.show()
-
+            # plt.imshow(sinogram[0, :, :].detach().cpu().numpy())
+            # plt.show()
     return sinogram, target
 
 
@@ -187,7 +195,8 @@ class VOCDataset(Dataset):
 
     def __getitem__(self, idx):
         input_path = self.file_list[idx]
-        target_path = self.file_list[idx].replace("sinogram", "rec_img_L1_shearlet_e-05")
+        target_path = self.file_list[idx].replace("_sinogram", "_rec_img_L1_shearlet_e-05")
+        target_path = target_path.replace("sinograms", "rec_images")
         sinogram, target = load_nifti_sample(
             input_path=input_path,
             target_dir=target_path,
