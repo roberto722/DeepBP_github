@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 from ..geometry import LinearProbeGeom
 
+import matplotlib.pyplot as plt
+
 
 class FkMigrationLinear(nn.Module):
     """Frequency-wavenumber migration for linear probe acquisitions.
@@ -418,6 +420,11 @@ class FkMigrationLinear(nn.Module):
             img_out = torch.cat(outputs, dim=1)
         else:  # pragma: no cover - defensive
             raise RuntimeError("No components produced in FkMigrationLinear.forward")
+
+        # img_to_see = img_out.detach().cpu().numpy()[0, 0, :, :]
+        # plt.imshow(img_to_see)
+        # plt.show()
+
         return img_out
 
 
