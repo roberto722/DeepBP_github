@@ -57,6 +57,7 @@ class TrainConfig:
     weight_threshold: Optional[float] = None
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
+    normalize_targets: bool = True
 
     # Model variants
     model_variant: str = "unrolled"

@@ -46,3 +46,18 @@ La dashboard utilizza i percorsi definiti in `TrainConfig` (in `main.py`) per in
 Puoi selezionare un file sinogramma già presente nei percorsi configurati oppure caricare un nuovo file `.hdf5`. Il parsing dei dati riusa la logica del dataset (`HDF5Dataset`) e mostra sia il sinogramma normalizzato sia la ricostruzione Delay-and-Sum e l'output del ViT.
 
 Assicurati di installare le dipendenze necessarie (Streamlit, PyTorch, nibabel, h5py, matplotlib, ecc.) prima di avviare la dashboard.
+
+## Normalizzazione dei target
+
+Di default il dataset scala sinogrammi e immagini di riferimento nell'intervallo
+[0, 1] utilizzando le statistiche globali configurate (`sino_min/sino_max` e
+`img_min/img_max`). È ora possibile disattivare la normalizzazione delle sole
+immagini impostando `TrainConfig.normalize_targets = False`. In questo modo i
+target vengono restituiti nel loro range originale (ad esempio 0–320) mentre i
+sinogrammi continuano a essere normalizzati.
+
+Disattivare la normalizzazione modifica la scala della loss L1 (i valori
+risulteranno più grandi in proporzione al nuovo range) e dei pesi basati
+sull'intensità. Le soglie `weight_threshold` e `ssim_mask_threshold` operano
+sempre sui valori prodotti dal dataset: se si usano target non normalizzati è
+quindi consigliabile aggiornarle esplicitamente in base alle nuove unità.

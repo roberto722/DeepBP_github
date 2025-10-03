@@ -33,6 +33,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             split="train",
             wavelength=cfg.wavelength,
             target_shape=(cfg.n_det, cfg.n_t),
+            normalize_targets=cfg.normalize_targets,
         )
 
         val_ds = HDF5Dataset(
@@ -45,6 +46,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             split="val",
             wavelength=cfg.wavelength,
             target_shape=(cfg.n_det, cfg.n_t),
+            normalize_targets=cfg.normalize_targets,
         )
     elif dataset_type == "voc":
         train_ds = VOCDataset(
@@ -55,6 +57,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             cfg.img_max,
             split="train",
             target_shape=(cfg.n_det, cfg.n_t),
+            normalize_targets=cfg.normalize_targets,
         )
 
         val_ds = VOCDataset(
@@ -65,6 +68,7 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             cfg.img_max,
             split="val",
             target_shape=(cfg.n_det, cfg.n_t),
+            normalize_targets=cfg.normalize_targets,
         )
     else:
         supported = ("hdf5", "voc")
