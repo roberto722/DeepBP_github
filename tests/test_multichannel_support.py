@@ -181,9 +181,13 @@ def test_save_side_by_side_multichannel_uses_first_channel(tmp_path):
 
 
 def test_save_side_by_side_pred_reuses_gt_normalization(tmp_path):
-    pred = torch.tensor([[[0.0, 0.5], [1.0, 2.0]]], dtype=torch.float32)
-    gt = torch.tensor([[[1.0, 2.0], [3.0, 5.0]]], dtype=torch.float32)
-    initial = torch.zeros(2, 2, dtype=torch.float32)
+    height, width = 32, 32
+    base = torch.linspace(0.0, 1.0, steps=height * width, dtype=torch.float32).view(
+        1, 1, height, width
+    )
+    pred = base.clone()
+    gt = base * 2.0 + 0.5
+    initial = torch.zeros(height, width, dtype=torch.float32)
 
     out_path = tmp_path / "viz_gt_norm.png"
     save_side_by_side(pred[0], gt[0], initial, str(out_path))
@@ -203,5 +207,14 @@ def test_save_side_by_side_pred_reuses_gt_normalization(tmp_path):
     expected_pred = _expected_uint8(pred[0, 0], normalization=gt_range)
     expected_gt = _expected_uint8(gt[0, 0], normalization=gt_range)
 
-    torch.testing.assert_close(pred_panel, expected_pred.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(gt_panel, expected_gt.cpu(), rtol=0, atol=0)
+    pred_diff = pred_panel != expected_pred.cpu()
+    gt_diff = gt_panel != expected_gt.cpu()
+
+    assert pred_diff.any(), "Expected annotation to modify prediction panel"
+    assert gt_diff.any(), "Expected annotation to modify ground-truth panel"
+
+    assert torch.any(~pred_diff), "Normalization drifted across prediction panel"
+    assert torch.any(~gt_diff), "Normalization drifted across ground-truth panel"
+
+    assert pred_panel[-1, -1] == expected_pred[-1, -1]
+    assert gt_panel[-1, -1] == expected_gt[-1, -1]

@@ -4,7 +4,7 @@ import os
 from typing import List, Optional, Tuple
 
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 def save_side_by_side(
@@ -98,6 +98,37 @@ def save_side_by_side(
         x = (x * 255.0).round().to(dtype=torch.uint8).cpu().numpy()
         return Image.fromarray(x, mode="L")
 
+    def _annotate_panel(panel: Image.Image, label: str) -> Image.Image:
+        annotated = panel.copy()
+        draw = ImageDraw.Draw(annotated)
+
+        try:
+            font = ImageFont.load_default()
+        except OSError:
+            font = None
+
+        margin = max(1, min(4, annotated.width // 20, annotated.height // 20))
+        if margin <= 0:
+            margin = 1
+        position = (margin, margin)
+        outline = 1
+        text_kwargs = {"font": font} if font is not None else {}
+
+        if outline > 0:
+            for dx in range(-outline, outline + 1):
+                for dy in range(-outline, outline + 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    draw.text(
+                        (position[0] + dx, position[1] + dy),
+                        label,
+                        fill=0,
+                        **text_kwargs,
+                    )
+
+        draw.text(position, label, fill=255, **text_kwargs)
+        return annotated
+
     gt_normalization: Optional[Tuple[float, float]] = None
     if gt.numel() > 0:
         gt_tensor = _prepare_for_display(gt)
@@ -116,12 +147,15 @@ def save_side_by_side(
             seen.add(idx)
             panels.append(to_uint8(tensor))
 
-    panels.append(
+    pred_panel = (
         to_uint8(pred, normalization=gt_normalization) if gt_normalization else to_uint8(pred)
     )
-    panels.append(
+    gt_panel = (
         to_uint8(gt, normalization=gt_normalization) if gt_normalization else to_uint8(gt)
     )
+
+    panels.append(_annotate_panel(pred_panel, "Prediction"))
+    panels.append(_annotate_panel(gt_panel, "Ground Truth"))
 
     width = sum(im.width for im in panels)
     height = max(im.height for im in panels)
