@@ -40,7 +40,7 @@ class TrainConfig:
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
-    fk_output_components: Tuple[str, ...] = ("magnitude",)
+    fk_output_components: Tuple[str, ...] = ("magnitude", "real", "imag")
 
     # ViT refiner
     vit_patch: int = 16
@@ -49,7 +49,7 @@ class TrainConfig:
     # Training
     epochs: int = 200
     batch_size: int = 8
-    lr: float = 2e-4
+    lr: float = 5e-4
     num_workers: int = 4
     clip_grad: float = 100.0
     use_tqdm: bool = True
@@ -76,7 +76,7 @@ class TrainConfig:
     img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold"
+    work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold_comps"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000" # "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
