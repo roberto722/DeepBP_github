@@ -23,7 +23,7 @@ def save_side_by_side(
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    def to_uint8(img: torch.Tensor) -> Image.Image:
+    def _prepare_for_display(img: torch.Tensor) -> torch.Tensor:
         x = img.detach()
 
         while x.dim() > 2:
@@ -34,10 +34,16 @@ def save_side_by_side(
         if x.dim() < 2:
             raise ValueError(f"Expected image-like tensor, got shape {tuple(img.shape)}")
 
-        x = x.to(dtype=torch.float32)
+        return x.to(dtype=torch.float32)
 
+    def _compute_normalization(
+        x: torch.Tensor,
+        *,
+        min_override: Optional[float] = None,
+        max_override: Optional[float] = None,
+    ) -> Tuple[float, float]:
         local_min = local_max = None
-        if vmin is None or vmax is None:
+        if min_override is None or max_override is None:
             finite_mask = torch.isfinite(x)
             if finite_mask.any():
                 valid = x[finite_mask]
@@ -46,8 +52,19 @@ def save_side_by_side(
                 local_min = torch.tensor(0.0, dtype=x.dtype, device=x.device)
                 local_max = torch.tensor(1.0, dtype=x.dtype, device=x.device)
 
-        lo = float(local_min.item()) if vmin is None and local_min is not None else float(vmin or 0.0)
-        hi = float(local_max.item()) if vmax is None and local_max is not None else float(vmax or lo)
+        if min_override is not None:
+            lo = float(min_override)
+        elif local_min is not None:
+            lo = float(local_min.item())
+        else:
+            lo = 0.0
+
+        if max_override is not None:
+            hi = float(max_override)
+        elif local_max is not None:
+            hi = float(local_max.item())
+        else:
+            hi = lo
 
         if not math.isfinite(lo):
             lo = 0.0
@@ -56,12 +73,37 @@ def save_side_by_side(
         if hi - lo < 1e-6:
             hi = lo + 1e-6
 
+        return lo, hi
+
+    def to_uint8(
+        img: torch.Tensor,
+        *,
+        normalization: Optional[Tuple[float, float]] = None,
+    ) -> Image.Image:
+        x = _prepare_for_display(img)
+
+        if normalization is None:
+            lo, hi = _compute_normalization(
+                x, min_override=vmin, max_override=vmax
+            )
+        else:
+            lo, hi = _compute_normalization(
+                x, min_override=normalization[0], max_override=normalization[1]
+            )
+
         x = torch.nan_to_num(x, nan=lo, posinf=hi, neginf=lo)
         x = (x - lo) / (hi - lo)
         x = x.clamp(0.0, 1.0)
 
         x = (x * 255.0).round().to(dtype=torch.uint8).cpu().numpy()
         return Image.fromarray(x, mode="L")
+
+    gt_normalization: Optional[Tuple[float, float]] = None
+    if gt.numel() > 0:
+        gt_tensor = _prepare_for_display(gt)
+        gt_normalization = _compute_normalization(
+            gt_tensor, min_override=vmin, max_override=vmax
+        )
 
     panels: List[Image.Image] = []
     panels.append(to_uint8(initial))
@@ -74,8 +116,12 @@ def save_side_by_side(
             seen.add(idx)
             panels.append(to_uint8(tensor))
 
-    panels.append(to_uint8(pred))
-    panels.append(to_uint8(gt))
+    panels.append(
+        to_uint8(pred, normalization=gt_normalization) if gt_normalization else to_uint8(pred)
+    )
+    panels.append(
+        to_uint8(gt, normalization=gt_normalization) if gt_normalization else to_uint8(gt)
+    )
 
     width = sum(im.width for im in panels)
     height = max(im.height for im in panels)

@@ -42,24 +42,66 @@ class _DummyModel(nn.Module):
         return pred, beamformer, None
 
 
-def _expected_uint8(channel: torch.Tensor) -> torch.Tensor:
-    x = channel.clone()
-    finite_mask = torch.isfinite(x)
-    if finite_mask.any():
-        valid = x[finite_mask]
-        local_min, local_max = torch.aminmax(valid)
-    else:
-        local_min = torch.tensor(0.0, dtype=x.dtype)
-        local_max = torch.tensor(1.0, dtype=x.dtype)
+def _normalization_range(
+    channel: torch.Tensor,
+    *,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> Tuple[float, float]:
+    x = channel.clone().to(dtype=torch.float32)
+    local_min = local_max = None
+    if vmin is None or vmax is None:
+        finite_mask = torch.isfinite(x)
+        if finite_mask.any():
+            valid = x[finite_mask]
+            local_min, local_max = torch.aminmax(valid)
+        else:
+            local_min = torch.tensor(0.0, dtype=x.dtype)
+            local_max = torch.tensor(1.0, dtype=x.dtype)
 
-    lo = float(local_min.item())
-    hi = float(local_max.item())
+    if vmin is not None:
+        lo = float(vmin)
+    elif local_min is not None:
+        lo = float(local_min.item())
+    else:
+        lo = 0.0
+
+    if vmax is not None:
+        hi = float(vmax)
+    elif local_max is not None:
+        hi = float(local_max.item())
+    else:
+        hi = lo
+
     if not math.isfinite(lo):
         lo = 0.0
     if not math.isfinite(hi):
         hi = lo
     if hi - lo < 1e-6:
         hi = lo + 1e-6
+
+    return lo, hi
+
+
+def _expected_uint8(
+    channel: torch.Tensor,
+    normalization: Optional[Tuple[float, float]] = None,
+    *,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> torch.Tensor:
+    x = channel.clone().to(dtype=torch.float32)
+
+    if normalization is None:
+        lo, hi = _normalization_range(x, vmin=vmin, vmax=vmax)
+    else:
+        lo, hi = normalization
+        if not math.isfinite(lo):
+            lo = 0.0
+        if not math.isfinite(hi):
+            hi = lo
+        if hi - lo < 1e-6:
+            hi = lo + 1e-6
 
     x = torch.nan_to_num(x, nan=lo, posinf=hi, neginf=lo)
     x = (x - lo) / (hi - lo)
@@ -136,3 +178,30 @@ def test_save_side_by_side_multichannel_uses_first_channel(tmp_path):
 
     torch.testing.assert_close(initial_panel, expected_initial.cpu(), rtol=0, atol=0)
     torch.testing.assert_close(iter_panel, expected_iter.cpu(), rtol=0, atol=0)
+
+
+def test_save_side_by_side_pred_reuses_gt_normalization(tmp_path):
+    pred = torch.tensor([[[0.0, 0.5], [1.0, 2.0]]], dtype=torch.float32)
+    gt = torch.tensor([[[1.0, 2.0], [3.0, 5.0]]], dtype=torch.float32)
+    initial = torch.zeros(2, 2, dtype=torch.float32)
+
+    out_path = tmp_path / "viz_gt_norm.png"
+    save_side_by_side(pred[0], gt[0], initial, str(out_path))
+
+    with Image.open(out_path) as img:
+        if hasattr(torch, "frombuffer"):
+            data = torch.frombuffer(img.tobytes(), dtype=torch.uint8)
+        else:
+            data = torch.tensor(list(img.getdata()), dtype=torch.uint8)
+        arr = data.view(img.height, img.width)
+
+    panel_w = arr.shape[1] // 3
+    pred_panel = arr[:, panel_w : 2 * panel_w]
+    gt_panel = arr[:, 2 * panel_w : 3 * panel_w]
+
+    gt_range = _normalization_range(gt[0, 0])
+    expected_pred = _expected_uint8(pred[0, 0], normalization=gt_range)
+    expected_gt = _expected_uint8(gt[0, 0], normalization=gt_range)
+
+    torch.testing.assert_close(pred_panel, expected_pred.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(gt_panel, expected_gt.cpu(), rtol=0, atol=0)
