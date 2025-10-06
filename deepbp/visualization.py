@@ -93,7 +93,7 @@ def save_side_by_side(
 
         x = torch.nan_to_num(x, nan=lo, posinf=hi, neginf=lo)
         x = (x - lo) / (hi - lo)
-        x = x.clamp(0.0, 1.0)
+        #x = x.clamp(0.0, 1.0)
 
         x = (x * 255.0).round().to(dtype=torch.uint8).cpu().numpy()
         return Image.fromarray(x, mode="L")

@@ -47,7 +47,7 @@ class TrainConfig:
     vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 200
+    epochs: int = 300
     batch_size: int = 8
     lr: float = 5e-4
     num_workers: int = 4
@@ -57,7 +57,7 @@ class TrainConfig:
     weight_threshold: Optional[float] = None
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
-    normalize_targets: bool = True
+    normalize_targets: bool = False
 
     # Model variants
     model_variant: str = "unrolled"
@@ -77,7 +77,7 @@ class TrainConfig:
     img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/VOC_fk_transformer_fp32_5_fftPad_20_NoThreshold_comps"
+    work_dir: str = "./runs/VOC_DAS_transformer"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000" # "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
