@@ -90,6 +90,8 @@ class TrainConfig:
     )
     resume_training: bool = False
     resume_checkpoint: Optional[str] = None
+    pretrained_checkpoint: Optional[str] = None
+    pretrained_load_optimizer_state: bool = False
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:

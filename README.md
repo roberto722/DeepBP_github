@@ -61,3 +61,16 @@ risulteranno più grandi in proporzione al nuovo range) e dei pesi basati
 sull'intensità. Le soglie `weight_threshold` e `ssim_mask_threshold` operano
 sempre sui valori prodotti dal dataset: se si usano target non normalizzati è
 quindi consigliabile aggiornarle esplicitamente in base alle nuove unità.
+
+## Fine-tuning da checkpoint pre-addestrati
+
+Per riutilizzare i pesi di un modello addestrato su un dataset differente (ad
+esempio per il fine-tuning su nuovi dati), puoi specificare il percorso del
+checkpoint nel campo `TrainConfig.pretrained_checkpoint`. Quando
+`resume_training` è `False`, il training verrà avviato da zero ma il modello
+caricherà automaticamente solo i pesi (`model.state_dict()`), lasciando
+inizializzati ex-novo ottimizzatore e scheduler: in questo modo le nuove
+statistiche di training non vengono contaminate da quelle del dataset
+originale. Se invece vuoi ripristinare anche lo stato di ottimizzatore e
+scheduler, imposta `TrainConfig.pretrained_load_optimizer_state = True` (a
+patto che il checkpoint contenga tali informazioni).
