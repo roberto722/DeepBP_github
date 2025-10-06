@@ -1,5 +1,7 @@
 """Differentiable delay-and-sum beamformer and its adjoint."""
 
+from typing import Optional, Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,6 +40,8 @@ class DelayAndSumLinear(nn.Module):
         else:
             self.register_buffer("apod", apod)
 
+        self._cached_norm_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+
     def get_apodization(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
         """Return the apodization weights in the requested dtype/device."""
 
@@ -49,29 +53,99 @@ class DelayAndSumLinear(nn.Module):
             apod = apod.clamp_min(torch.finfo(apod.dtype).tiny)
         return apod
 
-    def forward(self, sino: torch.Tensor) -> torch.Tensor:
+    def _normalize_sinogram(
+        self,
+        sino: torch.Tensor,
+        stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        update_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Normalize ``sino`` using per-sample mean and standard deviation."""
+
+        if stats is not None:
+            mean, std = stats
+            centered = sino - mean
+        else:
+            eps = torch.finfo(sino.dtype).eps
+            mean = sino.mean(dim=(-1, -2), keepdim=True)
+            centered = sino - mean
+            var = centered.pow(2).mean(dim=(-1, -2), keepdim=True)
+            std = torch.sqrt(var + eps)
+
+        normalized = centered / std
+
+        if stats is None:
+            stats = (mean, std)
+
+        if update_cache:
+            cached = tuple(component.detach() for component in stats)
+            self._cached_norm_stats = cached
+
+        return normalized, stats
+
+    def normalize_with_cached_stats(self, sino: torch.Tensor) -> torch.Tensor:
+        """Normalize ``sino`` using previously cached statistics."""
+
+        if self._cached_norm_stats is None:
+            raise RuntimeError(
+                "Normalization statistics are unavailable; run the beamformer on a "
+                "measured sinogram before requesting cached normalization."
+            )
+
+        normalized, _ = self._normalize_sinogram(
+            sino,
+            stats=self._cached_norm_stats,
+            update_cache=False,
+        )
+        return normalized
+
+    def forward(
+        self,
+        sino: torch.Tensor,
+        *,
+        stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        update_cache: bool = True,
+        pre_normalized: bool = False,
+        return_magnitude: bool = False,
+    ) -> torch.Tensor:
         """Apply the DAS beamformer to ``sino``."""
 
         B, C, n_det, n_t = sino.shape
         assert C == 1, "Expect sinogram with a single channel."
         assert n_det == self.geom.n_det and n_t == self.geom.n_t, "Sinogram dims mismatch geometry."
 
+        if pre_normalized:
+            if self._cached_norm_stats is None:
+                raise RuntimeError(
+                    "Cached normalization statistics are required for pre-normalized inputs."
+                )
+            if update_cache:
+                raise ValueError("Cannot update cached stats when input is pre-normalized.")
+            sino_norm = sino
+        else:
+            if stats is None and not update_cache:
+                stats = self._cached_norm_stats
+            sino_norm, stats = self._normalize_sinogram(
+                sino,
+                stats=stats,
+                update_cache=update_cache,
+            )
+
         k0 = self.k0
         k1 = k0 + 1
         alpha = self.alpha
-        if alpha.dtype != sino.dtype:
-            alpha = alpha.to(dtype=sino.dtype)
+        if alpha.dtype != sino_norm.dtype:
+            alpha = alpha.to(dtype=sino_norm.dtype)
         valid = self.valid
 
-        S = sino[:, 0, :, :]
-        out = torch.zeros((B, self.geom.ny, self.geom.nx), device=sino.device, dtype=sino.dtype)
+        S = sino_norm[:, 0, :, :]
+        out = torch.zeros((B, self.geom.ny, self.geom.nx), device=sino_norm.device, dtype=sino_norm.dtype)
 
         k0e = k0.unsqueeze(0).expand(B, -1, -1, -1)
         k1e = k1.unsqueeze(0).expand(B, -1, -1, -1)
         a = alpha.unsqueeze(0).expand(B, -1, -1, -1)
         ve = valid.unsqueeze(0).expand(B, -1, -1, -1)
 
-        apod = self.get_apodization(sino.dtype, sino.device)
+        apod = self.get_apodization(sino_norm.dtype, sino_norm.device)
         for d in range(self.geom.n_det):
             k0_d = k0e[..., d]
             k1_d = k1e[..., d]
@@ -87,6 +161,9 @@ class DelayAndSumLinear(nn.Module):
 
         norm = torch.clamp(apod.sum(), min=torch.finfo(apod.dtype).tiny)
         out = out / norm
+
+        if return_magnitude:
+            out = out.abs()
 
         return out.unsqueeze(1)
 
@@ -139,4 +216,12 @@ class ForwardProjectionLinear(nn.Module):
         norm = torch.clamp(apod.sum(), min=torch.finfo(apod.dtype).tiny)
         sino = sino / norm
 
-        return sino.unsqueeze(1)
+        sino = sino.unsqueeze(1)
+        cached_stats = getattr(self.das, "_cached_norm_stats", None)
+        sino_norm, _ = self.das._normalize_sinogram(
+            sino,
+            stats=cached_stats,
+            update_cache=False,
+        )
+
+        return sino_norm
