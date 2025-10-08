@@ -48,7 +48,7 @@ class TrainConfig:
 
     # Training
     epochs: int = 300
-    batch_size: int = 8
+    batch_size: int = 4
     lr: float = 5e-4
     num_workers: int = 4
     clip_grad: float = 100.0
@@ -61,32 +61,32 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 5
+    unroll_steps: int = 7
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
 
     # Global scaling (per-domain)
-    # sino_min: float = -11.0322
-    # sino_max: float = 12.5394
-    # img_min: float = 0.0
-    # img_max: float = 316.9658
-
-    sino_min: float = -1
-    sino_max: float = 1
+    sino_min: float = -11.0322
+    sino_max: float = 12.5394
     img_min: float = 0.0
-    img_max: float = 1.5
+    img_max: float = 316.9658
+
+    # sino_min: float = -1
+    # sino_max: float = 1
+    # img_min: float = 0.0
+    # img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/VOC_DAS_transformer"
+    work_dir: str = "./runs/Forearm_FK_transformer_unrolled"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
-    sino_dir: str = "E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000" # "Forearm2000_hdf5/train_val_tst"
+    sino_dir: str = "Forearm2000_hdf5/train_val_tst" #"E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
-    dataset_type: Literal["hdf5", "voc"] = "voc"
+    dataset_type: Literal["hdf5", "voc"] = "hdf5"
     """Dataset backend to use for loading sinograms/reconstructions."""
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(
-        default_factory=lambda: [0, 1, 2, 3, 4]
+        default_factory=lambda: [0, 4, 7]
     )
     resume_training: bool = False
     resume_checkpoint: Optional[str] = None

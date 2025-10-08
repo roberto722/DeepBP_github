@@ -154,7 +154,10 @@ class HDF5Dataset(Dataset):
         normalize_targets: bool = True,
     ):
         super().__init__()
-        self.input_dir = input_dir + "/" + split
+        if split == 'test':
+            self.input_dir = input_dir + "/tst/" + split
+        else:
+            self.input_dir = input_dir + "/trn_val/" + split
         self.target_dir = target_dir
         self.smin, self.smax = float(sino_min), float(sino_max)
         self.imin, self.imax = float(img_min), float(img_max)
