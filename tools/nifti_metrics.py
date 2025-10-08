@@ -129,6 +129,20 @@ def save_csv(results: Sequence[MetricResult], destination: Path) -> None:
         for res in results:
             writer.writerow([res.name, res.mse, res.mae, res.psnr, res.ssim])
 
+        summary = summarize_metrics(results)
+        writer.writerow([summary.name, summary.mse, summary.mae, summary.psnr, summary.ssim])
+
+
+def summarize_metrics(results: Sequence[MetricResult]) -> MetricResult:
+    summary = MetricResult(
+        name="summary",
+        mse=float(np.mean([res.mse for res in results])),
+        mae=float(np.mean([res.mae for res in results])),
+        psnr=float(np.mean([res.psnr for res in results])),
+        ssim=float(np.mean([res.ssim for res in results])),
+    )
+    return summary
+
 
 def main(
     predictions_dir: Path,
@@ -147,6 +161,9 @@ def main(
     print("file,mse,mae,psnr,ssim")
     for res in results:
         print(f"{res.name},{res.mse},{res.mae},{res.psnr},{res.ssim}")
+
+    summary = summarize_metrics(results)
+    print(f"{summary.name},{summary.mse},{summary.mae},{summary.psnr},{summary.ssim}")
 
     if csv_path is not None:
         save_csv(results, csv_path)
