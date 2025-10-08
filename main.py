@@ -214,6 +214,9 @@ def main() -> None:
             ssim_mask_threshold=cfg.ssim_mask_threshold,
             ssim_mask_dilation=cfg.ssim_mask_dilation,
             use_tqdm=cfg.use_tqdm,
+            normalize_targets=cfg.normalize_targets,
+            img_min=cfg.img_min,
+            img_max=cfg.img_max,
         )
 
         scheduler.step()
