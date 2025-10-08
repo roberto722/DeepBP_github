@@ -2,6 +2,8 @@
 import os
 from typing import Dict, List, Optional, Tuple
 
+import nibabel as nib
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -115,6 +117,17 @@ def validate(
                         vmax=None,
                         iter_steps=debug_steps,
                     )
+
+                    base_path, _ = os.path.splitext(out_path)
+
+                    def _save_nifti(tensor: torch.Tensor, suffix: str) -> None:
+                        array = tensor.detach().cpu().to(dtype=torch.float32).numpy()
+                        nifti = nib.Nifti1Image(array.astype(np.float32), affine=np.eye(4))
+                        nib.save(nifti, f"{base_path}_{suffix}.nii.gz")
+
+                    _save_nifti(pred[b], "pred")
+                    _save_nifti(img[b], "target")
+                    _save_nifti(initial_panel, "initial")
                     saved += 1
 
         if progress is not None:
