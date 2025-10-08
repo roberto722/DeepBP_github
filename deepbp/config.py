@@ -40,18 +40,18 @@ class TrainConfig:
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
-    fk_output_components: Tuple[str, ...] = ("magnitude", "real", "imag")
+    fk_output_components: Tuple[str, ...] = ("magnitude", ) #"real", "imag"
 
     # ViT refiner
     vit_patch: int = 16
     vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 300
+    epochs: int = 200
     batch_size: int = 4
-    lr: float = 5e-4
+    lr: float = 2e-4
     num_workers: int = 4
-    clip_grad: float = 100.0
+    clip_grad: float = 1.0
     use_tqdm: bool = True
     weight_alpha: float = 0
     weight_threshold: Optional[float] = None
