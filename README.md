@@ -47,6 +47,28 @@ Puoi selezionare un file sinogramma già presente nei percorsi configurati oppur
 
 Assicurati di installare le dipendenze necessarie (Streamlit, PyTorch, nibabel, h5py, matplotlib, ecc.) prima di avviare la dashboard.
 
+## Inferenza batch sullo split di test
+
+Per eseguire l'inferenza sull'intero split di test e salvare automaticamente
+le ricostruzioni in formato NIfTI (`.nii.gz`) è disponibile lo script CLI
+`tools/infer_test_set.py`:
+
+```bash
+python tools/infer_test_set.py \
+    --checkpoint /percorso/a/checkpoint.pt \
+    --config /percorso/a/config.json \
+    --output-dir /percorso/di/output \
+    --split test
+```
+
+Lo script riutilizza la configurazione del training (`TrainConfig`); è quindi
+consigliato passare il file `config.json` salvato durante l'addestramento per
+garantire che percorsi, normalizzazioni e parametri geometrici coincidano con
+quelli usati in fase di training. I sinogrammi vengono preprocessati con la
+stessa pipeline del dataset, il modello viene caricato dal checkpoint indicato
+e ogni ricostruzione viene salvata come `<nome_file>_prediction.nii.gz` nella
+cartella di output specificata.
+
 ## Normalizzazione dei target
 
 Di default il dataset scala sinogrammi e immagini di riferimento nell'intervallo
