@@ -172,11 +172,11 @@ def main(
 
 if __name__ == "__main__":
     # Update the paths and suffix below before running the script.
-    PREDICTIONS_DIR = Path("/path/to/predictions")
-    TARGETS_DIR = Path("/path/to/targets")
-    TARGET_SUFFIX = "_target"
+    PREDICTIONS_DIR = Path("E:\Scardigno\Fotoacustica\deepmb\DeepMB_trn_val_tst_Original\DeepMB_trn_val_tst\\results\F2000_HDF5_transformer_comparison\\batch_ifr\\val\\nii")
+    TARGETS_DIR = Path("E:\Scardigno\datasets_transformer_proj\Forearm2000_recs\L1_Shearlet")
+    TARGET_SUFFIX = "_800_rec_L1_shearlet"
     EXTENSIONS = (".nii", ".nii.gz")  # Set to None to process every file
-    CSV_PATH = None  # Optionally set to Path("metrics.csv")
+    CSV_PATH = Path("metrics.csv") # Optionally set to Path("metrics.csv") or None
 
     main(
         predictions_dir=PREDICTIONS_DIR,
