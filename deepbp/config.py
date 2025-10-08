@@ -40,7 +40,7 @@ class TrainConfig:
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
-    fk_output_components: Tuple[str, ...] = ("magnitude", ) #"real", "imag"
+    fk_output_components: Tuple[str, ...] = ("magnitude", "real", "imag")
 
     # ViT refiner
     vit_patch: int = 16
@@ -57,7 +57,7 @@ class TrainConfig:
     weight_threshold: Optional[float] = None
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
-    normalize_targets: bool = False
+    normalize_targets: bool = True
 
     # Model variants
     model_variant: str = "unrolled"

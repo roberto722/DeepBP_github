@@ -164,10 +164,11 @@ def _save_prediction(
             "nibabel is required to save predictions in NIfTI format."
             " Install it with 'pip install nibabel'."
         )
-    array = image.detach().cpu().numpy()
+    array = image.detach().cpu().to(dtype=torch.float32)
     if squeeze:
-        array = np.squeeze(array)
-    nifti = nib.Nifti1Image(array.astype(np.float32), affine=np.eye(4))
+        array = array.squeeze()
+    array_np = array.numpy().astype(np.float32, copy=False)
+    nifti = nib.Nifti1Image(array_np, affine=np.eye(4))
     name = Path(reference_path).name
     if name.endswith(".nii.gz"):
         stem = name[:-7]
