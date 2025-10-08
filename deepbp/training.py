@@ -28,6 +28,9 @@ def validate(
     ssim_mask_threshold: Optional[float] = None,
     ssim_mask_dilation: int = 0,
     use_tqdm: bool = True,
+    normalize_targets: bool = False,
+    img_min: float = 0.0,
+    img_max: float = 1.0,
 ) -> Dict[str, float]:
     model.eval()
     agg: Dict[str, float] = {"psnr": 0.0, "ssim": 0.0, "l1": 0.0, "weighted_l1": 0.0}
@@ -121,8 +124,12 @@ def validate(
                     base_path, _ = os.path.splitext(out_path)
 
                     def _save_nifti(tensor: torch.Tensor, suffix: str) -> None:
-                        array = tensor.detach().cpu().to(dtype=torch.float32).numpy()
-                        nifti = nib.Nifti1Image(array.astype(np.float32), affine=np.eye(4))
+                        array = tensor.detach().cpu().to(dtype=torch.float32)
+                        if normalize_targets:
+                            scale = float(img_max - img_min)
+                            array = array * scale + float(img_min)
+                        array_np = array.numpy().astype(np.float32, copy=False)
+                        nifti = nib.Nifti1Image(array_np, affine=np.eye(4))
                         nib.save(nifti, f"{base_path}_{suffix}.nii.gz")
 
                     _save_nifti(pred[b], "pred")
