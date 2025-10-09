@@ -123,33 +123,3 @@ def test_large_output_norm_scale_init_is_finite() -> None:
     assert torch.isfinite(stored_scale).all()
     assert torch.isfinite(recovered_scale).all()
     assert torch.allclose(recovered_scale, desired_scale, rtol=1e-5, atol=1e-5)
-
-
-def test_forward_multiple_components_returns_expected_channels() -> None:
-    geom = _make_geometry()
-    migration = FkMigrationLinear(geom)
-
-    sino = torch.randn(1, 2, geom.n_det, geom.n_t)
-
-    multi = migration.forward(sino, return_components=("real", "imag"))
-    assert multi.shape[1] == 2 * sino.shape[1]
-
-    stats = migration._cached_norm_stats
-    assert stats is not None
-
-    real_only = migration.forward(
-        sino,
-        stats=stats,
-        update_cache=False,
-        return_magnitude=False,
-    )
-    imag_only = migration.forward(
-        sino,
-        stats=stats,
-        update_cache=False,
-        return_components=("imag",),
-    )
-
-    real_part, imag_part = multi.chunk(2, dim=1)
-    assert torch.allclose(real_part, real_only)
-    assert torch.allclose(imag_part, imag_only)

@@ -40,28 +40,26 @@ class TrainConfig:
     fk_output_normalization_shift: Optional[float] = 0
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
-    fk_output_components: Tuple[str, ...] = ("magnitude", "real", "imag")
 
     # ViT refiner
-    vit_patch: int = 16
+    vit_patch: int = 8
     vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 200
-    batch_size: int = 4
-    lr: float = 2e-4
+    epochs: int = 300
+    batch_size: int = 8
+    lr: float = 5e-4
     num_workers: int = 4
-    clip_grad: float = 1.0
+    clip_grad: float = 100.0
     use_tqdm: bool = True
     weight_alpha: float = 0
     weight_threshold: Optional[float] = None
     ssim_mask_threshold: Optional[float] = 0.5
     ssim_mask_dilation: int = 0
-    normalize_targets: bool = True
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 7
+    unroll_steps: int = 5
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
 
@@ -77,21 +75,19 @@ class TrainConfig:
     # img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/Forearm_FK_transformer_unrolled"
+    work_dir: str = "./runs/Forearm_fk_2000"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
-    sino_dir: str = "Forearm2000_hdf5/train_val_tst" #"E:\Scardigno\Fotoacustica\dataset\VOC_forearm_2000"
+    sino_dir: str = "Forearm2000_hdf5/train_val_tst" # "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
     dataset_type: Literal["hdf5", "voc"] = "hdf5"
     """Dataset backend to use for loading sinograms/reconstructions."""
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(
-        default_factory=lambda: [0, 4, 7]
+        default_factory=lambda: [0, 1, 2, 3, 4]
     )
     resume_training: bool = False
     resume_checkpoint: Optional[str] = None
-    pretrained_checkpoint: Optional[str] = None
-    pretrained_load_optimizer_state: bool = False
 
 
 def build_geometry(cfg: TrainConfig) -> LinearProbeGeom:
@@ -146,7 +142,6 @@ def build_projection_operators(
             static_output_shift=cfg.fk_output_normalization_shift,
             output_norm_scale_init=cfg.fk_output_norm_scale_init,
             output_norm_shift_init=cfg.fk_output_norm_shift_init,
-            output_components=cfg.fk_output_components,
         )
         forward_op = ForwardProjectionFk(beamformer)
     else:
@@ -167,9 +162,8 @@ def create_model(cfg: TrainConfig, device: torch.device) -> torch.nn.Module:
     )
 
     vit_stride = cfg.vit_stride if cfg.vit_stride is not None else cfg.vit_patch
-    vit_in_ch = getattr(beamformer, "default_output_channels", 1)
     vit = ViTRefiner(
-        in_ch=vit_in_ch,
+        in_ch=1,
         embed_dim=256,
         patch=cfg.vit_patch,
         stride=vit_stride,

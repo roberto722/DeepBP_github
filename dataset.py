@@ -49,7 +49,6 @@ def load_hdf5_sample(
     img_min: float,
     img_max: float,
     apply_normalization: bool = True,
-    normalize_target: bool = True,
     require_target: bool = True,
 ):
     """Load a single sinogram/target pair applying the dataset preprocessing pipeline."""
@@ -80,7 +79,7 @@ def load_hdf5_sample(
 
     if apply_normalization:
         sinogram = minmax_scale(sinogram, sino_min, sino_max)
-        if target is not None and normalize_target:
+        if target is not None:
             target = minmax_scale(target, img_min, img_max)
             # plt.imshow(target[0, :, :], cmap='gray')
             # plt.show()
@@ -99,7 +98,6 @@ def load_nifti_sample(
     img_min: float,
     img_max: float,
     apply_normalization: bool = True,
-    normalize_target: bool = True,
     require_target: bool = True,
 ):
     """Load a single sinogram/target pair applying the dataset preprocessing pipeline."""
@@ -130,7 +128,7 @@ def load_nifti_sample(
 
     if apply_normalization:
         sinogram = minmax_scale(sinogram, sino_min, sino_max)
-        if target is not None and normalize_target:
+        if target is not None:
             target = minmax_scale(target, img_min, img_max)
             # plt.imshow(target[0, :, :], cmap='gray')
             # plt.show()
@@ -140,19 +138,7 @@ def load_nifti_sample(
 
 
 class HDF5Dataset(Dataset):
-    def __init__(
-        self,
-        input_dir,
-        target_dir,
-        sino_min: float,
-        sino_max: float,
-        img_min: float,
-        img_max: float,
-        split='train',
-        wavelength=800,
-        target_shape=(128, 1640),
-        normalize_targets: bool = True,
-    ):
+    def __init__(self, input_dir, target_dir, sino_min: float, sino_max: float, img_min: float, img_max: float, split='train', wavelength=800, target_shape=(128, 1640)):
         super().__init__()
         if split == 'test':
             self.input_dir = input_dir + "/tst/" + split
@@ -168,7 +154,6 @@ class HDF5Dataset(Dataset):
             if f.endswith('.hdf5')
         ])
         self.target_shape = target_shape
-        self.normalize_targets = normalize_targets
 
     def __len__(self):
         return len(self.file_list)
@@ -185,24 +170,13 @@ class HDF5Dataset(Dataset):
             img_min=self.imin,
             img_max=self.imax,
             apply_normalization=True,
-            normalize_target=self.normalize_targets,
             require_target=True,
         )
 
         return sinogram, target
 
 class VOCDataset(Dataset):
-    def __init__(
-        self,
-        input_dir,
-        sino_min: float,
-        sino_max: float,
-        img_min: float,
-        img_max: float,
-        split='train',
-        target_shape=(128, 1640),
-        normalize_targets: bool = True,
-    ):
+    def __init__(self, input_dir, sino_min: float, sino_max: float, img_min: float, img_max: float, split='train', target_shape=(128, 1640)):
         super().__init__()
         if split == 'test':
             self.sino_dir = input_dir + "/tst/" + split + "/sinograms"
@@ -218,7 +192,6 @@ class VOCDataset(Dataset):
             if f.endswith('.nii')
         ])
         self.target_shape = target_shape
-        self.normalize_targets = normalize_targets
 
     def __len__(self):
         return len(self.file_list)
@@ -236,7 +209,6 @@ class VOCDataset(Dataset):
             img_min=self.imin,
             img_max=self.imax,
             apply_normalization=True,
-            normalize_target=self.normalize_targets,
             require_target=True,
         )
 

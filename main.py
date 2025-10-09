@@ -33,7 +33,6 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             split="train",
             wavelength=cfg.wavelength,
             target_shape=(cfg.n_det, cfg.n_t),
-            normalize_targets=cfg.normalize_targets,
         )
 
         val_ds = HDF5Dataset(
@@ -46,7 +45,6 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             split="val",
             wavelength=cfg.wavelength,
             target_shape=(cfg.n_det, cfg.n_t),
-            normalize_targets=cfg.normalize_targets,
         )
     elif dataset_type == "voc":
         train_ds = VOCDataset(
@@ -57,7 +55,6 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             cfg.img_max,
             split="train",
             target_shape=(cfg.n_det, cfg.n_t),
-            normalize_targets=cfg.normalize_targets,
         )
 
         val_ds = VOCDataset(
@@ -68,7 +65,6 @@ def build_dataloaders(cfg: TrainConfig) -> Tuple[DataLoader, DataLoader]:
             cfg.img_max,
             split="val",
             target_shape=(cfg.n_det, cfg.n_t),
-            normalize_targets=cfg.normalize_targets,
         )
     else:
         supported = ("hdf5", "voc")
@@ -102,12 +98,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = TrainConfig()
 
-    should_clear_workdir = (
-        os.path.exists(cfg.work_dir)
-        and not cfg.resume_training
-        and cfg.pretrained_checkpoint is None
-    )
-    if should_clear_workdir:
+    if os.path.exists(cfg.work_dir) and not cfg.resume_training:
         shutil.rmtree(cfg.work_dir)
     os.makedirs(cfg.work_dir, exist_ok=True)
     img_dir = os.path.join(cfg.work_dir, "val_images")
@@ -155,39 +146,6 @@ def main() -> None:
         best_psnr = checkpoint.get("best_psnr", checkpoint.get("val_psnr", -1.0))
         best_epoch = int(checkpoint.get("best_epoch", checkpoint.get("epoch", 0)))
         start_epoch = int(checkpoint["epoch"])
-    elif cfg.pretrained_checkpoint:
-        checkpoint_path = cfg.pretrained_checkpoint
-        if not os.path.isfile(checkpoint_path):
-            raise FileNotFoundError(
-                "Pretrained checkpoint file not found: "
-                f"'{checkpoint_path}'. Update TrainConfig.pretrained_checkpoint or disable the option."
-            )
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        if "model" not in checkpoint:
-            raise KeyError(
-                "Pretrained checkpoint does not contain a 'model' state_dict: "
-                f"'{checkpoint_path}'."
-            )
-        model.load_state_dict(checkpoint["model"])
-        if cfg.pretrained_load_optimizer_state:
-            missing_keys = [key for key in ("optimizer", "scheduler") if key not in checkpoint]
-            if missing_keys:
-                raise KeyError(
-                    "Requested optimizer/scheduler reload but checkpoint is missing entries: "
-                    + ", ".join(missing_keys)
-                )
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            scheduler.load_state_dict(checkpoint["scheduler"])
-            best_psnr = checkpoint.get("best_psnr", checkpoint.get("val_psnr", best_psnr))
-            best_epoch = int(checkpoint.get("best_epoch", checkpoint.get("epoch", best_epoch)))
-            start_epoch = int(checkpoint.get("epoch", start_epoch))
-            print(
-                f"Loaded pretrained checkpoint from '{checkpoint_path}' including optimizer and scheduler state."
-            )
-        else:
-            print(
-                f"Loaded pretrained weights from '{checkpoint_path}' without optimizer/scheduler state."
-            )
 
     last_epoch = start_epoch
     for epoch in range(start_epoch + 1, cfg.epochs + 1):
@@ -214,9 +172,6 @@ def main() -> None:
             ssim_mask_threshold=cfg.ssim_mask_threshold,
             ssim_mask_dilation=cfg.ssim_mask_dilation,
             use_tqdm=cfg.use_tqdm,
-            normalize_targets=cfg.normalize_targets,
-            img_min=cfg.img_min,
-            img_max=cfg.img_max,
         )
 
         scheduler.step()

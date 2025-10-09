@@ -1,7 +1,7 @@
 """Frequency-wavenumber migration operators."""
 import math
 import warnings
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -14,33 +14,7 @@ import matplotlib.pyplot as plt
 
 
 class FkMigrationLinear(nn.Module):
-    """Frequency-wavenumber migration for linear probe acquisitions.
-
-    Parameters
-    ----------
-    geom:
-        Acquisition geometry definition.
-    trainable_apodization:
-        Whether to learn per-detector apodization weights.
-    per_channel_apodization:
-        Whether to provide separate apodization weights per input channel.
-    fft_pad:
-        Number of samples used to zero-pad the temporal FFT.
-    window:
-        Optional temporal windowing function name.
-    learnable_output_normalization:
-        Enable a learnable sigmoid-based post-processing for magnitude outputs.
-    static_output_scale/static_output_shift:
-        Fixed affine post-processing parameters for magnitude outputs.
-    output_norm_scale_init/output_norm_shift_init:
-        Optional initialization for the learnable normalization parameters.
-    output_components:
-        Tuple describing which complex-valued components to return by default.
-        Supported entries are ``"magnitude"``, ``"real"``, and ``"imag"``.
-        When the forward pass requests magnitude channels their normalization is
-        applied using either the learnable or static configuration. Real and
-        imaginary channels are never normalized automatically.
-    """
+    """Frequency-wavenumber migration for linear probe acquisitions."""
 
     def __init__(
         self,
@@ -54,7 +28,6 @@ class FkMigrationLinear(nn.Module):
         static_output_shift: Optional[float] = None,
         output_norm_scale_init: Optional[float] = None,
         output_norm_shift_init: Optional[float] = None,
-        output_components: Optional[Iterable[str]] = None,
     ) -> None:
         super().__init__()
         self.geom = geom
@@ -63,11 +36,6 @@ class FkMigrationLinear(nn.Module):
         self.learnable_output_normalization = learnable_output_normalization
         self.static_output_scale = static_output_scale
         self.static_output_shift = static_output_shift
-
-        if output_components is None:
-            output_components = ("magnitude",)
-        self.output_components = self._validate_components(output_components)
-        self.default_output_channels = len(self.output_components)
 
         if self.learnable_output_normalization and (
             self.static_output_scale is not None or self.static_output_shift is not None
@@ -158,22 +126,6 @@ class FkMigrationLinear(nn.Module):
             self.output_shift = nn.Parameter(torch.tensor(shift_value, dtype=torch.float32))
 
         self._cached_norm_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-
-    @staticmethod
-    def _validate_components(components: Iterable[str]) -> Tuple[str, ...]:
-        valid = {"magnitude", "real", "imag"}
-        try:
-            component_list = tuple(str(comp).lower() for comp in components)
-        except TypeError as exc:  # pragma: no cover - defensive
-            raise TypeError("output_components must be an iterable of strings") from exc
-        if not component_list:
-            raise ValueError("output_components must contain at least one entry")
-        invalid = [comp for comp in component_list if comp not in valid]
-        if invalid:
-            raise ValueError(
-                "Unsupported components requested for FkMigrationLinear: " + ", ".join(invalid)
-            )
-        return component_list
 
     @staticmethod
     def _build_time_window(window: Optional[str], length: int) -> torch.Tensor:
@@ -295,7 +247,6 @@ class FkMigrationLinear(nn.Module):
         update_cache: bool = True,
         pre_normalized: bool = False,
         return_magnitude: bool = True,
-        return_components: Optional[Sequence[str]] = None,
     ) -> torch.Tensor:
         """Apply f-k migration to a sinogram of shape ``[B, C, n_det, n_t]``.
 
@@ -320,12 +271,6 @@ class FkMigrationLinear(nn.Module):
             returned. Setting this to ``False`` returns the signed real component
             of the image, which is useful for residual corrections where the
             contribution may be positive or negative.
-        return_components:
-            Optional override for the components requested from the complex
-            image. When provided, the resulting tensor concatenates the requested
-            components along the channel dimension in the order specified. The
-            ``return_magnitude=False`` shorthand is equivalent to requesting only
-            the real component.
         """
 
         B, C, n_det, n_t = sino.shape
@@ -377,54 +322,40 @@ class FkMigrationLinear(nn.Module):
         img_complex = torch.matmul(band, phase_x)
         img_complex = img_complex.view(B, C, self.geom.ny, self.geom.nx)
 
+        if return_magnitude:
+            img_out = img_complex.abs()
+        else:
+            img_out = img_complex.real
+        img_out = img_out.to(dtype)
+
         apod_sum = torch.clamp(apod.sum(dim=-1, keepdim=True), min=eps)
         norm = apod_sum.view(1, C, 1, 1) * freq_weight_sum.reshape(1, 1, 1, 1)
-        img_complex = img_complex / norm.to(dtype=img_complex.dtype)
+        img_out = img_out / norm
 
-        if return_components is None:
-            if return_magnitude:
-                components = self.output_components
+        # print(f"Min: {img_out.min()}, Max: {img_out.max()}")
+
+        if return_magnitude:
+            if self.learnable_output_normalization:
+                scale = F.softplus(self.output_scale).to(dtype=img_out.dtype, device=img_out.device)
+                shift = self.output_shift.to(dtype=img_out.dtype, device=img_out.device)
+                img_out = torch.sigmoid(scale * (img_out - shift))
             else:
-                components = ("real",)
-        else:
-            components = self._validate_components(return_components)
-
-        outputs: List[torch.Tensor] = []
-        for component in components:
-            if component == "magnitude":
-                comp_tensor = img_complex.abs().to(dtype)
-                if self.learnable_output_normalization:
-                    scale = F.softplus(self.output_scale).to(dtype=comp_tensor.dtype, device=comp_tensor.device)
-                    shift = self.output_shift.to(dtype=comp_tensor.dtype, device=comp_tensor.device)
-                    comp_tensor = torch.sigmoid(scale * (comp_tensor - shift))
-                else:
-                    if self.static_output_shift is not None:
-                        shift = torch.as_tensor(
-                            self.static_output_shift, dtype=comp_tensor.dtype, device=comp_tensor.device
-                        )
-                        comp_tensor = comp_tensor - shift
-                    if self.static_output_scale is not None:
-                        scale = torch.as_tensor(
-                            self.static_output_scale, dtype=comp_tensor.dtype, device=comp_tensor.device
-                        )
-                        if torch.any(scale == 0):
-                            raise ValueError("static_output_scale must be non-zero for normalization")
-                        comp_tensor = comp_tensor / scale
-            elif component == "real":
-                comp_tensor = img_complex.real.to(dtype)
-            else:  # component == "imag"
-                comp_tensor = img_complex.imag.to(dtype)
-            outputs.append(comp_tensor)
-
-        if outputs:
-            img_out = torch.cat(outputs, dim=1)
-        else:  # pragma: no cover - defensive
-            raise RuntimeError("No components produced in FkMigrationLinear.forward")
+                if self.static_output_shift is not None:
+                    shift = torch.as_tensor(
+                        self.static_output_shift, dtype=img_out.dtype, device=img_out.device
+                    )
+                    img_out = img_out - shift
+                if self.static_output_scale is not None:
+                    scale = torch.as_tensor(
+                        self.static_output_scale, dtype=img_out.dtype, device=img_out.device
+                    )
+                    if torch.any(scale == 0):
+                        raise ValueError("static_output_scale must be non-zero for normalization")
+                    img_out = img_out / scale
 
         # img_to_see = img_out.detach().cpu().numpy()[0, 0, :, :]
         # plt.imshow(img_to_see)
         # plt.show()
-
         return img_out
 
 
@@ -446,16 +377,10 @@ class ForwardProjectionFk(nn.Module):
         return self.migration.get_apodization(dtype, device, channels)
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
-        """Project an image into the sinogram domain using the f-k model.
-
-        Notes
-        -----
-        Only the first channel of ``img`` is used for the physical projection.
-        Any additional channels are propagated unchanged through data-consistency
-        operations performed outside this module.
-        """
+        """Project an image into the sinogram domain using the f-k model."""
 
         B, C, ny, nx = img.shape
+        assert C == 1, "Expect image with a single channel."
         assert ny == self.geom.ny and nx == self.geom.nx, "Image dims mismatch geometry."
 
         if (

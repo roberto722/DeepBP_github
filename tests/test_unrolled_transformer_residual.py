@@ -36,7 +36,7 @@ def _variance(x: torch.Tensor) -> torch.Tensor:
 
 def test_unrolled_residual_matches_forward_projection_variance() -> None:
     geom = _make_geometry()
-    beamformer = FkMigrationLinear(geom, output_components=("magnitude", "real"))
+    beamformer = FkMigrationLinear(geom)
     forward = ForwardProjectionFk(beamformer)
 
     model = UnrolledDelayAndSumTransformer(
@@ -51,12 +51,7 @@ def test_unrolled_residual_matches_forward_projection_variance() -> None:
     torch.manual_seed(42)
     sino = torch.randn(1, 1, geom.n_det, geom.n_t)
 
-    out, x0, intermediates = model(sino)
-
-    assert getattr(beamformer, "default_output_channels", 1) == 2
-    assert out.shape[1] == 1
-    assert x0.shape[1] == 1
-    assert len(intermediates) == 1 and intermediates[0].shape[1] == 1
+    _, x0, _ = model(sino)
 
     sino_normalized = beamformer.normalize_with_cached_stats(sino)
     sino_est = forward(x0)
@@ -102,26 +97,3 @@ def test_beamformer_residual_returns_signed_output() -> None:
     assert torch.all(correction_mag >= 0)
     assert torch.any(correction_signed < 0)
     assert torch.any(correction_signed > 0)
-
-
-def test_forward_projection_fk_supports_multichannel_input() -> None:
-    geom = _make_geometry()
-    beamformer = FkMigrationLinear(geom)
-    forward = ForwardProjectionFk(beamformer)
-
-    torch.manual_seed(1)
-    img = torch.randn(2, 3, geom.ny, geom.nx, requires_grad=True)
-
-    sino = forward(img)
-
-    assert sino.shape == (2, 1, geom.n_det, geom.n_t)
-
-    loss = sino.square().sum()
-    loss.backward()
-
-    assert img.grad is not None
-    grad_primary = img.grad[:, 0]
-    grad_aux = img.grad[:, 1:]
-
-    assert torch.any(grad_primary != 0)
-    assert torch.all(grad_aux == 0)

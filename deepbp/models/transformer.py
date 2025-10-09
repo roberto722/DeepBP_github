@@ -1,5 +1,5 @@
 """Beamformer + transformer composite models."""
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -24,9 +24,8 @@ class DelayAndSumTransformer(nn.Module):
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        beamformed = self.beamformer(sino)
-        out = self.vit(beamformed)
-        initial_img = beamformed[:, :1, ...]
+        initial_img = self.beamformer(sino)
+        out = self.vit(initial_img)
         intermediates = [out]
         return out, initial_img, intermediates
 
@@ -61,12 +60,8 @@ class UnrolledDelayAndSumTransformer(nn.Module):
                 p.requires_grad = False
 
     def forward(self, sino: torch.Tensor):
-        x0_full = self.beamformer(sino)
+        x0 = self.beamformer(sino)
         sino_normalized = self.beamformer.normalize_with_cached_stats(sino)
-        static_features = x0_full[:, 1:, :, :]
-        if static_features.numel() == 0:
-            static_features = None
-        x0 = x0_full[:, :1, :, :]
         xi = x0
         intermediates: List[torch.Tensor] = []
 
@@ -82,12 +77,7 @@ class UnrolledDelayAndSumTransformer(nn.Module):
                 return_magnitude=False,
             )
             xi = xi + weight * correction
-            if static_features is not None:
-                vit_input = torch.cat([xi, static_features], dim=1)
-            else:
-                vit_input = xi
-            vit_out = self.vit(vit_input)
-            xi = vit_out[:, :1, :, :]
+            xi = self.vit(xi)
             intermediates.append(xi)
 
         return xi, x0, intermediates
