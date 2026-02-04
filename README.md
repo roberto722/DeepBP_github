@@ -33,6 +33,36 @@ stampa un riepilogo JSON con statistiche basilari dell'immagine ricostruita.
 > di riutilizzare direttamente il loader del dataset già presente nel training
 > loop.
 
+## Script di inference sul dataset
+
+Per eseguire l'inferenza su un intero split del dataset e salvare metriche e
+output su disco è disponibile lo script `tools/inference_dataset.py`.
+
+Esempio (usando il checkpoint migliore e i percorsi di default in `TrainConfig`):
+
+```bash
+python tools/inference_dataset.py \
+    --checkpoint /path/to/best.pt \
+    --split val \
+    --output-dir ./inference_outputs \
+    --save-png \
+    --intermediate-indices 0,1,2
+```
+
+Lo script salva un file `metrics.json` con le metriche aggregate e per-sample,
+oltre alle predizioni in formato `.npy` e, se richiesto, PNG affiancati
+(`Initial | intermediates | Pred | GT`).
+
+Per usare la configurazione salvata nella run di training (utile in PyCharm),
+puoi passare `--run-dir` oppure `--config-path`:
+
+```bash
+python tools/inference_dataset.py \
+    --checkpoint /path/to/best.pt \
+    --run-dir /path/to/run_dir \
+    --split val
+```
+
 ## Dashboard interattiva
 
 È disponibile anche una piccola dashboard Streamlit per visualizzare sinogrammi, ricostruzioni intermedie e output finali del modello:
