@@ -50,6 +50,40 @@ def list_hdf5_files(base_dir: str) -> List[str]:
     return sorted(f for f in os.listdir(base_dir) if f.endswith(".hdf5"))
 
 
+def list_available_splits(input_root: str) -> List[Tuple[str, str]]:
+    """Return split display labels and absolute dirs.
+
+    The expected structure is:
+    - <input_root>/trn_val/<split_name>
+    - <input_root>/tst/<split_name>
+
+    If the nested structure is not present, fallback to first-level folders.
+    """
+
+    if not os.path.isdir(input_root):
+        return []
+
+    split_entries: List[Tuple[str, str]] = []
+    nested_roots = ("trn_val", "tst")
+    for root_name in nested_roots:
+        root_path = os.path.join(input_root, root_name)
+        if not os.path.isdir(root_path):
+            continue
+        for split_name in sorted(os.listdir(root_path)):
+            split_dir = os.path.join(root_path, split_name)
+            if os.path.isdir(split_dir):
+                split_entries.append((f"{root_name}/{split_name}", split_dir))
+
+    if split_entries:
+        return split_entries
+
+    for split_name in sorted(os.listdir(input_root)):
+        split_dir = os.path.join(input_root, split_name)
+        if os.path.isdir(split_dir):
+            split_entries.append((split_name, split_dir))
+    return split_entries
+
+
 def tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
     return t.detach().cpu().squeeze().numpy()
 
@@ -229,15 +263,18 @@ def main():
 
     input_root = os.path.join(cfg.data_root, cfg.sino_dir)
     target_root = os.path.join(cfg.data_root, cfg.recs_dir)
-    splits = [d for d in sorted(os.listdir(input_root)) if os.path.isdir(os.path.join(input_root, d))] if os.path.isdir(input_root) else []
+    split_entries = list_available_splits(input_root)
 
     st.header("Selezione del file")
-    selected_split = None
+    selected_split_label = None
+    selected_split_dir = None
     selected_file = None
-    if splits:
-        selected_split = st.selectbox("Split disponibile", splits)
-        split_dir = os.path.join(input_root, selected_split)
-        files = list_hdf5_files(split_dir)
+    if split_entries:
+        split_labels = [label for label, _ in split_entries]
+        selected_split_label = st.selectbox("Split disponibile", split_labels)
+        split_map = {label: directory for label, directory in split_entries}
+        selected_split_dir = split_map[selected_split_label]
+        files = list_hdf5_files(selected_split_dir)
         if files:
             selected_file = st.selectbox("File dal dataset", files)
         else:
@@ -250,9 +287,9 @@ def main():
     sample_path = None
     sample_label = None
     temp_path = None
-    if selected_file and selected_split:
-        sample_path = os.path.join(input_root, selected_split, selected_file)
-        sample_label = f"{selected_split}/{selected_file}"
+    if selected_file and selected_split_dir and selected_split_label:
+        sample_path = os.path.join(selected_split_dir, selected_file)
+        sample_label = f"{selected_split_label}/{selected_file}"
     elif uploaded_file is not None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".hdf5") as tmp:
             tmp.write(uploaded_file.read())
