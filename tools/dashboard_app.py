@@ -18,14 +18,29 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dataset import load_hdf5_sample, minmax_scale
-from main import (
-    TrainConfig,
-    create_model,
-    load_checkpoint,
-    psnr,
-    ssim,
-    run_inference_steps,
-)
+from deepbp.config import TrainConfig, create_model
+from deepbp.inference import run_inference_steps
+from deepbp.metrics import psnr, ssim
+
+
+def load_checkpoint(
+    model: torch.nn.Module,
+    cfg: TrainConfig,
+    checkpoint_name: str,
+    map_location: Optional[torch.device] = None,
+) -> dict:
+    """Load model weights from a checkpoint file inside cfg.work_dir."""
+
+    checkpoint_path = Path(cfg.work_dir) / checkpoint_name
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint non trovato: {checkpoint_path.resolve()}"
+        )
+
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model.load_state_dict(state_dict)
+    return checkpoint if isinstance(checkpoint, dict) else {"model": state_dict}
 
 
 def list_hdf5_files(base_dir: str) -> List[str]:
