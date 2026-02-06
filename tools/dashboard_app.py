@@ -422,6 +422,12 @@ def main():
                     use_container_width=True,
                     on_select="rerun",
                 )
+                row_key = "pixel_row"
+                col_key = "pixel_col"
+                if row_key not in st.session_state:
+                    st.session_state[row_key] = 0
+                if col_key not in st.session_state:
+                    st.session_state[col_key] = 0
                 selected_point = None
                 if selection and selection.get("points"):
                     selected_point = selection["points"][0]
@@ -430,10 +436,15 @@ def main():
                     col_idx = int(round(selected_point["x"]))
                     row_idx = max(0, min(row_idx, height - 1))
                     col_idx = max(0, min(col_idx, width - 1))
-                else:
-                    row_col = st.columns(2)
-                    row_idx = row_col[0].slider("Riga (y)", 0, height - 1, 0)
-                    col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, 0)
+                    st.session_state[row_key] = row_idx
+                    st.session_state[col_key] = col_idx
+                if st.session_state[row_key] > height - 1:
+                    st.session_state[row_key] = height - 1
+                if st.session_state[col_key] > width - 1:
+                    st.session_state[col_key] = width - 1
+                row_col = st.columns(2)
+                row_idx = row_col[0].slider("Riga (y)", 0, height - 1, key=row_key)
+                col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, key=col_key)
                     
                 pixel_value = float(value_array[row_idx, col_idx])
                 st.metric(
