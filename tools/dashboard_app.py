@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import plotly.express as px
 import streamlit as st
 import torch
 import torch.nn.functional as F
@@ -399,9 +400,41 @@ def main():
                 if value_array.ndim > 2:
                     value_array = value_array.squeeze()
                 height, width = value_array.shape
-                row_col = st.columns(2)
-                row_idx = row_col[0].slider("Riga (y)", 0, height - 1, 0)
-                col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, 0)
+                st.caption(
+                    "Clicca un pixel nella figura (modalità selezione) per leggerne il valore."
+                )
+                fig = px.imshow(
+                    value_array,
+                    color_continuous_scale="gray",
+                    origin="upper",
+                    aspect="equal",
+                )
+                fig.update_layout(
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    dragmode="select",
+                    coloraxis_showscale=True,
+                )
+                fig.update_traces(
+                    hovertemplate="x=%{x}<br>y=%{y}<br>valore=%{z:.6f}<extra></extra>"
+                )
+                selection = st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    on_select="rerun",
+                )
+                selected_point = None
+                if selection and selection.get("points"):
+                    selected_point = selection["points"][0]
+                if selected_point is not None:
+                    row_idx = int(round(selected_point["y"]))
+                    col_idx = int(round(selected_point["x"]))
+                    row_idx = max(0, min(row_idx, height - 1))
+                    col_idx = max(0, min(col_idx, width - 1))
+                else:
+                    row_col = st.columns(2)
+                    row_idx = row_col[0].slider("Riga (y)", 0, height - 1, 0)
+                    col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, 0)
+                    
                 pixel_value = float(value_array[row_idx, col_idx])
                 st.metric(
                     "Valore selezionato",
