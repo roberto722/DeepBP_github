@@ -335,6 +335,7 @@ def main():
             images.append(("Predizione ViTRefiner", pred_plot))
 
             metrics_values = None
+            target_plot = None
             if target is not None:
                 target_norm = minmax_scale(target, cfg.img_min, cfg.img_max).to(
                     pred_img.dtype
@@ -369,7 +370,8 @@ def main():
                     "mae": mae_value,
                 }
 
-                images.append(("Target", tensor_to_numpy(target_norm)))
+                target_plot = tensor_to_numpy(target_norm)
+                images.append(("Target", target_plot))
             else:
                 st.info("Target non trovato per il file selezionato.")
 
@@ -380,6 +382,42 @@ def main():
                 ssim_col.metric("SSIM", f"{metrics_values['ssim']:.4f}")
                 mae_col.metric("MAE", f"{metrics_values['mae']:.4f}")
             plot_outputs(images, sinogram=True)
+
+            st.subheader("Ispezione interattiva valori pixel")
+            value_images = {
+                "Predizione ViTRefiner": pred_plot,
+            }
+            if target_plot is not None:
+                value_images["Target"] = target_plot
+
+            with st.expander("Mostra valori per coordinate", expanded=True):
+                selected_value_label = st.selectbox(
+                    "Seleziona immagine",
+                    list(value_images.keys()),
+                )
+                value_array = np.asarray(value_images[selected_value_label])
+                if value_array.ndim > 2:
+                    value_array = value_array.squeeze()
+                height, width = value_array.shape
+                row_col = st.columns(2)
+                row_idx = row_col[0].slider("Riga (y)", 0, height - 1, 0)
+                col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, 0)
+                pixel_value = float(value_array[row_idx, col_idx])
+                st.metric(
+                    "Valore selezionato",
+                    f"{pixel_value:.6f}",
+                    help=f"Coordinate (y={row_idx}, x={col_idx})",
+                )
+                y_start = max(row_idx - 1, 0)
+                y_end = min(row_idx + 2, height)
+                x_start = max(col_idx - 1, 0)
+                x_end = min(col_idx + 2, width)
+                neighborhood = value_array[y_start:y_end, x_start:x_end]
+                st.caption("Intorno 3x3 (se disponibile):")
+                st.dataframe(
+                    neighborhood,
+                    use_container_width=True,
+                )
 
             has_initial = initial_img is not None
             if iter_imgs:
