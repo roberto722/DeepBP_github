@@ -62,6 +62,7 @@ class TrainConfig:
     unroll_steps: int = 5
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
+    enforce_non_negative_output: bool = True
 
     # Global scaling (per-domain)
     sino_min: float = -11.0322
@@ -171,6 +172,7 @@ def create_model(cfg: TrainConfig, device: torch.device) -> torch.nn.Module:
         heads=8,
         mlp_ratio=4.0,
         p_drop=0.1,
+        enforce_non_negative_output=cfg.enforce_non_negative_output,
     )
     Hp, Wp = vit.embed.compute_grid_size(cfg.ny, cfg.nx)
     ph, pw = vit.patch_size
