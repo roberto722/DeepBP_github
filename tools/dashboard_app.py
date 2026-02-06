@@ -434,6 +434,7 @@ def main():
                     row_col = st.columns(2)
                     row_idx = row_col[0].slider("Riga (y)", 0, height - 1, 0)
                     col_idx = row_col[1].slider("Colonna (x)", 0, width - 1, 0)
+                    
                 pixel_value = float(value_array[row_idx, col_idx])
                 st.metric(
                     "Valore selezionato",
