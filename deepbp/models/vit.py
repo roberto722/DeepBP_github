@@ -195,11 +195,7 @@ class ViTRefiner(nn.Module):
             self.fold_weight = weight
         return weight
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        enforce_non_negative_output: Optional[bool] = None,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         z, (Hp, Wp), (H, W), stride = self.embed(x)
         stride_hw = tuple(stride)
         expected_grid = self._compute_grid_size(H, W)
@@ -237,13 +233,6 @@ class ViTRefiner(nn.Module):
         img = self.local_fusion(img)
         if img.shape == x.shape:
             img = img + x
-        enforce_non_negative = (
-            self.enforce_non_negative_output
-            if enforce_non_negative_output is None
-            else enforce_non_negative_output
-        )
-        if enforce_non_negative:
-            img = img.clamp_min(0.0)
         return img
 
 

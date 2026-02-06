@@ -42,15 +42,15 @@ class TrainConfig:
     fk_output_norm_shift_init: Optional[float] = None
 
     # ViT refiner
-    vit_patch: int = 8
+    vit_patch: int = 16
     vit_stride: Optional[int] = None
 
     # Training
-    epochs: int = 300
+    epochs: int = 200
     batch_size: int = 8
     lr: float = 5e-4
     num_workers: int = 4
-    clip_grad: float = 100.0
+    clip_grad: float = 1.0
     use_tqdm: bool = True
     weight_alpha: float = 0
     weight_threshold: Optional[float] = None
@@ -59,7 +59,7 @@ class TrainConfig:
 
     # Model variants
     model_variant: str = "unrolled"
-    unroll_steps: int = 5
+    unroll_steps: int = 7
     data_consistency_weight: float = 1.0
     learnable_data_consistency_weight: bool = True
     enforce_non_negative_output: bool = True
@@ -76,7 +76,7 @@ class TrainConfig:
     # img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/Forearm_fk_2000"
+    work_dir: str = "./runs/Forearm_fk_2000_unroll_7"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst" # "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
@@ -85,7 +85,7 @@ class TrainConfig:
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(
-        default_factory=lambda: [0, 1, 2, 3, 4]
+        default_factory=lambda: [0, 1, 3, 5, 7]
     )
     resume_training: bool = False
     resume_checkpoint: Optional[str] = None
