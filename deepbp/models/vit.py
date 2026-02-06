@@ -127,6 +127,7 @@ class ViTRefiner(nn.Module):
         heads: int = 8,
         mlp_ratio: float = 4.0,
         p_drop: float = 0.1,
+        enforce_non_negative_output: bool = False,
     ) -> None:
         super().__init__()
         self.patch = patch
@@ -145,6 +146,7 @@ class ViTRefiner(nn.Module):
         self.register_buffer("fold_weight", torch.empty(0), persistent=False)
         self._fold_weight_shape: Optional[Tuple[int, int]] = None
         self._fold_weight_stride: Optional[Tuple[int, int]] = None
+        self.enforce_non_negative_output = enforce_non_negative_output
 
     def _compute_grid_size(self, H: int, W: int) -> Tuple[int, int]:
         return self.embed.compute_grid_size(H, W)
@@ -231,6 +233,8 @@ class ViTRefiner(nn.Module):
         img = self.local_fusion(img)
         if img.shape == x.shape:
             img = img + x
+        if self.enforce_non_negative_output:
+            img = img.clamp_min(0.0)
         return img
 
 
