@@ -67,7 +67,7 @@ class UnrolledDelayAndSumTransformer(nn.Module):
 
         weight = self.data_consistency_weight.view(1, 1, 1, 1)
 
-        for _ in range(self.num_steps):
+        for step in range(self.num_steps):
             sino_est = self.forward_operator(xi)
             sino_residual = sino_normalized - sino_est
             correction = self.beamformer(
@@ -77,7 +77,10 @@ class UnrolledDelayAndSumTransformer(nn.Module):
                 return_magnitude=False,
             )
             xi = xi + weight * correction
-            xi = self.vit(xi)
+            enforce_non_negative = (
+                step == self.num_steps - 1 and self.vit.enforce_non_negative_output
+            )
+            xi = self.vit(xi, enforce_non_negative_output=enforce_non_negative)
             intermediates.append(xi)
 
         return xi, x0, intermediates
