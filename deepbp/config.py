@@ -35,9 +35,9 @@ class TrainConfig:
     beamformer_type: Literal["das", "fk"] = "fk"
     fk_fft_pad: int = 20
     fk_window: Optional[str] = None
-    fk_learnable_output_normalization: bool = False
-    fk_output_normalization_scale: Optional[float] = 1
-    fk_output_normalization_shift: Optional[float] = 0
+    fk_learnable_output_normalization: bool = True
+    fk_output_normalization_scale: Optional[float] = None
+    fk_output_normalization_shift: Optional[float] = None
     fk_output_norm_scale_init: Optional[float] = None
     fk_output_norm_shift_init: Optional[float] = None
 
@@ -76,7 +76,7 @@ class TrainConfig:
     # img_max: float = 1.5
 
     # Paths / dataset
-    work_dir: str = "./runs/Forearm_fk_2000_unroll_7"
+    work_dir: str = "./runs/Forearm_fk_2000_unroll_7_fk_learnable_out_norm"
     data_root: str = "E:/Scardigno/datasets_transformer_proj"
     sino_dir: str = "Forearm2000_hdf5/train_val_tst" # "Forearm2000_hdf5/train_val_tst"
     recs_dir: str = "Forearm2000_recs/L1_Shearlet"  # NOT USED IN VOC
@@ -85,7 +85,7 @@ class TrainConfig:
     save_val_images: bool = True
     max_val_images: int = 1
     val_intermediate_indices: Optional[List[int]] = field(
-        default_factory=lambda: [0, 1, 3, 5, 7]
+        default_factory=lambda: [0, 1, 3, 7]
     )
     resume_training: bool = False
     resume_checkpoint: Optional[str] = None
@@ -172,7 +172,6 @@ def create_model(cfg: TrainConfig, device: torch.device) -> torch.nn.Module:
         heads=8,
         mlp_ratio=4.0,
         p_drop=0.1,
-        enforce_non_negative_output=cfg.enforce_non_negative_output,
     )
     Hp, Wp = vit.embed.compute_grid_size(cfg.ny, cfg.nx)
     ph, pw = vit.patch_size
