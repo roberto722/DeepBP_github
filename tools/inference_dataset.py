@@ -1,27 +1,60 @@
 #!/usr/bin/env python3
-"""Run inference over a dataset split and optionally export outputs."""
-import argparse
+"""Configurable folder inference script with NIfTI export and reconstruction metrics.
+
+Configure all parameters in the CONFIG dataclass below and run:
+    python tools/inference_folder_config.py
+"""
+
 import json
 import os
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
+import nibabel as nib
 import numpy as np
 import torch
-from tqdm.auto import tqdm
 
-from dataset import HDF5Dataset, VOCDataset
+from dataset import load_hdf5_sample, minmax_scale
 from deepbp.config import TrainConfig, create_model
+from deepbp.inference import run_inference_steps
 from deepbp.metrics import psnr, ssim
-from deepbp.visualization import save_side_by_side
+import time
 
 
-def _parse_indices(raw: Optional[str]) -> Optional[List[int]]:
-    if raw is None:
-        return None
-    raw = raw.strip()
-    if not raw:
-        return None
-    return [int(item) for item in raw.split(",") if item.strip()]
+@dataclass
+class InferenceConfig:
+    # --- Paths ---
+    # If run_dir is set, configuration is loaded automatically from:
+    # 1) <run_dir>/config.json
+    # 2) fallback to checkpoint embedded config (best.pt/last.pt/first available .pt)
+    run_dir: Optional[str] = r"E:\Scardigno\DeepBP_github\runs\Forearm_fk_2000_unroll_10"
+    checkpoint_path: Optional[str] = None
+    input_dir: str = r"E:\Scardigno\datasets_transformer_proj\Forearm2000_hdf5\train_val_tst\tst\test"
+    target_dir: str = r"E:\Scardigno\datasets_transformer_proj\Forearm2000_recs\L1_Shearlet"
+    output_dir: str = os.path.join(run_dir, "inference_raw_outputs")
+
+    # --- Dataset parsing ---
+    data_format: str = "hdf5"  # "hdf5" or "nii"
+    wavelength: str = "800"  # used only for hdf5 target filename pattern
+    input_extension: str = ".hdf5"  # ".hdf5" or ".nii"
+    target_extension: str = ".nii"
+    target_suffix_replace_from: Optional[str] = None  # e.g. "_sinogram"
+    target_suffix_replace_to: Optional[str] = None  # e.g. "_rec_img_L1_shearlet_e-05"
+
+    # --- Preprocessing / geometry ---
+    target_shape: Tuple[int, int] = (128, 1640)
+    sino_min: float = -0.10295463952521738
+    sino_max: float = 0.07286326741859795
+    img_min: float = 0.0
+    img_max: float = 255.0
+
+    # --- Runtime ---
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    max_samples: Optional[int] = None
+
+
+CONFIG = InferenceConfig()
 
 
 def _apply_config_dict(cfg: TrainConfig, config_dict: Dict) -> None:
@@ -30,220 +63,200 @@ def _apply_config_dict(cfg: TrainConfig, config_dict: Dict) -> None:
             setattr(cfg, key, value)
 
 
-def _load_checkpoint_config(cfg: TrainConfig, checkpoint: Dict) -> None:
-    ckpt_cfg = checkpoint.get("config")
-    if not isinstance(ckpt_cfg, dict):
-        return
-    _apply_config_dict(cfg, ckpt_cfg)
+def _load_json_config(path: Path) -> Optional[Dict]:
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid config file content: {path}")
+    return payload
 
 
-def _load_config_json(cfg: TrainConfig, config_path: str) -> None:
-    if not os.path.isfile(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_dict = json.load(f)
-    if not isinstance(config_dict, dict):
-        raise ValueError(f"Config file must contain a JSON object: {config_path}")
-    _apply_config_dict(cfg, config_dict)
+def _auto_checkpoint_from_run_dir(run_dir: Path) -> Path:
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    ckpt_paths = sorted(p for p in run_dir.glob("*.pt") if p.is_file())
+    if not ckpt_paths:
+        raise FileNotFoundError(f"No .pt checkpoint found in run directory: {run_dir}")
+
+    by_name = {p.name: p for p in ckpt_paths}
+    for preferred in ("best.pt", "last.pt"):
+        if preferred in by_name:
+            return by_name[preferred]
+    return ckpt_paths[0]
 
 
-def _build_dataset(cfg: TrainConfig, split: str):
-    dataset_type = cfg.dataset_type.lower()
-    input_dir = os.path.join(cfg.data_root, cfg.sino_dir)
-    if dataset_type == "hdf5":
-        target_dir = os.path.join(cfg.data_root, cfg.recs_dir)
-        return HDF5Dataset(
-            input_dir,
-            target_dir,
-            cfg.sino_min,
-            cfg.sino_max,
-            cfg.img_min,
-            cfg.img_max,
-            split=split,
+def _load_experiment_config(train_cfg: TrainConfig, checkpoint: Dict, run_dir: Optional[Path]) -> str:
+    if run_dir is not None:
+        run_cfg_path = run_dir / "config.json"
+        file_cfg = _load_json_config(run_cfg_path)
+        if file_cfg is not None:
+            _apply_config_dict(train_cfg, file_cfg)
+            return f"file:{run_cfg_path}"
+
+    ckpt_cfg = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+    if isinstance(ckpt_cfg, dict):
+        _apply_config_dict(train_cfg, ckpt_cfg)
+        return "checkpoint:embedded"
+
+    return "default"
+
+
+def _resolve_target_path(input_path: str, cfg: InferenceConfig) -> str:
+    stem = os.path.splitext(os.path.basename(input_path))[0]
+
+    if cfg.data_format == "hdf5":
+        # Match existing dataset convention
+        filename = f"{stem}_{cfg.wavelength}_rec_L1_shearlet{cfg.target_extension}"
+        return os.path.join(cfg.target_dir, filename)
+
+    target_stem = stem
+    if cfg.target_suffix_replace_from is not None and cfg.target_suffix_replace_to is not None:
+        target_stem = target_stem.replace(cfg.target_suffix_replace_from, cfg.target_suffix_replace_to)
+
+    return os.path.join(cfg.target_dir, f"{target_stem}{cfg.target_extension}")
+
+
+def _load_pair(input_path: str, cfg: InferenceConfig) -> Tuple[torch.Tensor, torch.Tensor]:
+    if cfg.data_format == "hdf5":
+        return load_hdf5_sample(
+            input_path=input_path,
+            target_dir=cfg.target_dir,
             wavelength=cfg.wavelength,
-            target_shape=(cfg.n_det, cfg.n_t),
+            target_shape=cfg.target_shape,
+            sino_min=cfg.sino_min,
+            sino_max=cfg.sino_max,
+            img_min=cfg.img_min,
+            img_max=cfg.img_max,
+            apply_normalization=False,
+            require_target=True,
         )
-    if dataset_type == "voc":
-        return VOCDataset(
-            input_dir,
-            cfg.sino_min,
-            cfg.sino_max,
-            cfg.img_min,
-            cfg.img_max,
-            split=split,
-            target_shape=(cfg.n_det, cfg.n_t),
-        )
-    supported = ("hdf5", "voc")
-    raise ValueError(
-        f"Unsupported dataset_type '{cfg.dataset_type}'. Expected one of: {', '.join(supported)}."
-    )
+
+    raise ValueError("CONFIG.data_format must be either 'hdf5'")
+
+
+def _save_raw(path: str, tensor: torch.Tensor) -> Dict[str, object]:
+    arr = tensor.detach().cpu().numpy().astype(np.float32)
+    nifti = nib.Nifti1Image(arr, affine=np.eye(4, dtype=np.float32))
+    nib.save(nifti, path)
+    return {
+        "path": path,
+        "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
+    }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run inference on a dataset split.")
-    parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")
-    parser.add_argument("--split", default="val", choices=["train", "val", "test"], help="Dataset split.")
-    parser.add_argument("--data-root", default=None, help="Override TrainConfig.data_root.")
-    parser.add_argument("--sino-dir", default=None, help="Override TrainConfig.sino_dir.")
-    parser.add_argument("--recs-dir", default=None, help="Override TrainConfig.recs_dir (HDF5 only).")
-    parser.add_argument("--dataset-type", default=None, choices=["hdf5", "voc"], help="Dataset backend.")
-    parser.add_argument("--batch", type=int, default=1, help="Batch size per forward pass.")
-    parser.add_argument("--max-samples", type=int, default=None, help="Limit the number of samples.")
-    parser.add_argument("--device", default=None, help="Override device (e.g. cuda, cpu).")
-    parser.add_argument("--output-dir", default="./inference_outputs", help="Output directory.")
-    parser.add_argument("--save-png", action="store_true", help="Save side-by-side PNGs.")
-    parser.add_argument(
-        "--config-path",
-        default=None,
-        help="Path to a saved config.json from a training run.",
-    )
-    parser.add_argument(
-        "--run-dir",
-        default=None,
-        help="Training run directory containing config.json (alternative to --config-path).",
-    )
-    parser.add_argument(
-        "--intermediate-indices",
-        default=None,
-        help="Comma-separated indices of intermediate steps to include in PNGs.",
-    )
-    parser.add_argument(
-        "--no-checkpoint-config",
-        action="store_true",
-        help="Ignore the configuration stored in the checkpoint.",
-    )
-    args = parser.parse_args()
+    os.makedirs(CONFIG.output_dir, exist_ok=True)
+    pred_nifti_dir = os.path.join(CONFIG.output_dir, "pred_nifti")
+    gt_nifti_dir = os.path.join(CONFIG.output_dir, "gt_nifti")
+    os.makedirs(pred_nifti_dir, exist_ok=True)
+    os.makedirs(gt_nifti_dir, exist_ok=True)
 
-    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    cfg = TrainConfig()
+    input_files = sorted(
+        os.path.join(CONFIG.input_dir, name)
+        for name in os.listdir(CONFIG.input_dir)
+        if name.endswith(CONFIG.input_extension)
+    )
 
-    checkpoint = torch.load(args.checkpoint, map_location=device)
-    if args.run_dir is not None and args.config_path is not None:
-        raise ValueError("Use either --run-dir or --config-path, not both.")
-    if args.run_dir is not None:
-        config_path = os.path.join(args.run_dir, "config.json")
-        _load_config_json(cfg, config_path)
-    elif args.config_path is not None:
-        _load_config_json(cfg, args.config_path)
-    elif not args.no_checkpoint_config:
-        _load_checkpoint_config(cfg, checkpoint)
+    if CONFIG.max_samples is not None:
+        input_files = input_files[: CONFIG.max_samples]
 
-    if args.data_root is not None:
-        cfg.data_root = args.data_root
-    if args.sino_dir is not None:
-        cfg.sino_dir = args.sino_dir
-    if args.recs_dir is not None:
-        cfg.recs_dir = args.recs_dir
-    if args.dataset_type is not None:
-        cfg.dataset_type = args.dataset_type
+    if not input_files:
+        raise RuntimeError(f"No files with extension '{CONFIG.input_extension}' found in {CONFIG.input_dir}")
 
-    model = create_model(cfg, device)
+    device = torch.device(CONFIG.device)
+    train_cfg = TrainConfig()
+
+    run_dir = Path(CONFIG.run_dir).resolve() if CONFIG.run_dir else None
+    if CONFIG.checkpoint_path is not None:
+        checkpoint_path = Path(CONFIG.checkpoint_path).resolve()
+    elif run_dir is not None:
+        checkpoint_path = _auto_checkpoint_from_run_dir(run_dir)
+    else:
+        raise ValueError("Set CONFIG.checkpoint_path or CONFIG.run_dir.")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    config_source = _load_experiment_config(train_cfg, checkpoint, run_dir)
+
+    model = create_model(train_cfg, device)
     state = checkpoint.get("model", checkpoint)
     model.load_state_dict(state)
     model.eval()
 
-    dataset = _build_dataset(cfg, args.split)
-    total = len(dataset)
-    limit = min(total, args.max_samples) if args.max_samples is not None else total
-
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-    per_sample: List[Dict[str, float]] = []
-    indices = _parse_indices(args.intermediate_indices)
+    records: List[Dict[str, object]] = []
+    cumulative_inference_seconds = 0.0
 
     with torch.no_grad():
-        for start in tqdm(range(0, limit, args.batch), desc="Inference"):
-            end = min(start + args.batch, limit)
-            batch_sino = []
-            batch_target = []
-            batch_names = []
-            for idx in range(start, end):
-                sino, target = dataset[idx]
-                batch_sino.append(sino)
-                batch_target.append(target)
-                path = dataset.file_list[idx]
-                stem, _ = os.path.splitext(os.path.basename(path))
-                batch_names.append(stem)
+        for input_path in input_files:
+            name = os.path.splitext(os.path.basename(input_path))[0]
+            sinogram, target = _load_pair(input_path, CONFIG)
 
-            sino_tensor = torch.stack(batch_sino, dim=0).to(device)
-            target_tensor = torch.stack(batch_target, dim=0).to(device)
+            sinogram = sinogram.unsqueeze(0)
+            target = target.unsqueeze(0)
 
-            pred, initial, intermediates = model(sino_tensor)
-            iter_sequence: List[torch.Tensor] = []
-            if initial is not None:
-                iter_sequence.append(initial)
-            if intermediates is not None:
-                if isinstance(intermediates, (list, tuple)):
-                    iter_sequence.extend(intermediates)
-                else:
-                    iter_sequence.append(intermediates)
-            if pred is not None and (not iter_sequence or iter_sequence[-1] is not pred):
-                iter_sequence.append(pred)
+            sample_start = time.perf_counter()
+            _, _, pred, _ = run_inference_steps(
+                model=model,
+                sinogram=sinogram,
+                cfg=train_cfg,
+                device=device,
+                normalize=True,
+            )
+            sample_inference_seconds = time.perf_counter() - sample_start
+            cumulative_inference_seconds += sample_inference_seconds
 
-            batch_psnr = psnr(pred, target_tensor)
-            batch_ssim = ssim(pred, target_tensor)
-            batch_l1 = torch.mean(torch.abs(pred - target_tensor), dim=(1, 2, 3))
+            target_norm = minmax_scale(target, train_cfg.img_min, train_cfg.img_max).to(
+                pred.dtype
+            )
 
-            for b, name in enumerate(batch_names):
-                record = {
+            sample_psnr = float(psnr(pred, target_norm)[0].item())
+            sample_ssim = float(ssim(pred, target_norm)[0].item())
+            sample_mse = float(torch.mean((pred - target_norm) ** 2).item())
+            sample_mae = float(torch.mean(torch.abs(pred - target_norm)).item())
+
+            pred_nifti = _save_raw(os.path.join(pred_nifti_dir, f"{name}.nii.gz"), pred[0])
+            gt_nifti = _save_raw(os.path.join(gt_nifti_dir, f"{name}.nii.gz"), target_norm[0])
+
+            records.append(
+                {
                     "name": name,
-                    "psnr": float(batch_psnr[b].item()),
-                    "ssim": float(batch_ssim[b].item()),
-                    "l1": float(batch_l1[b].item()),
+                    "input_path": input_path,
+                    "target_path": _resolve_target_path(input_path, CONFIG),
+                    "pred_nifti": pred_nifti,
+                    "gt_nifti": gt_nifti,
+                    "metrics": {
+                        "ssim": sample_ssim,
+                        "psnr": sample_psnr,
+                        "mse": sample_mse,
+                        "mae": sample_mae,
+                    },
+                    "inference_speed": {
+                        "sample_seconds": sample_inference_seconds,
+                        "sample_hz": (1.0 / sample_inference_seconds) if sample_inference_seconds > 0 else float("inf"),
+                        "cumulative_seconds": cumulative_inference_seconds,
+                        "cumulative_avg_seconds": cumulative_inference_seconds / (len(records) + 1),
+                        "cumulative_avg_hz": ((len(records) + 1) / cumulative_inference_seconds)
+                        if cumulative_inference_seconds > 0
+                        else float("inf"),
+                    },
                 }
-                per_sample.append(record)
-
-                out_npy = os.path.join(output_dir, f"{name}_pred.npy")
-                np.save(out_npy, pred[b].detach().cpu().numpy())
-
-                if args.save_png:
-                    debug_steps: Optional[List[tuple]] = None
-                    if indices and iter_sequence:
-                        total_steps = len(iter_sequence)
-                        selected: List[tuple] = []
-                        seen_steps = set()
-                        for idx in indices:
-                            actual_idx = idx if idx >= 0 else total_steps + idx
-                            if actual_idx < 0 or actual_idx >= total_steps:
-                                continue
-                            if actual_idx in seen_steps:
-                                continue
-                            seen_steps.add(actual_idx)
-                            if actual_idx == 0 or actual_idx == total_steps - 1:
-                                continue
-                            selected.append((actual_idx, iter_sequence[actual_idx][b]))
-                        if selected:
-                            selected.sort(key=lambda item: item[0])
-                            debug_steps = selected
-
-                    initial_panel = initial[b] if initial is not None else pred[b]
-                    out_png = os.path.join(output_dir, f"{name}_pred.png")
-                    save_side_by_side(
-                        pred[b],
-                        target_tensor[b],
-                        initial_panel,
-                        out_png,
-                        vmin=None,
-                        vmax=None,
-                        iter_steps=debug_steps,
-                    )
-
-    if per_sample:
-        avg_psnr = sum(r["psnr"] for r in per_sample) / len(per_sample)
-        avg_ssim = sum(r["ssim"] for r in per_sample) / len(per_sample)
-        avg_l1 = sum(r["l1"] for r in per_sample) / len(per_sample)
-    else:
-        avg_psnr = avg_ssim = avg_l1 = 0.0
+            )
 
     summary = {
-        "split": args.split,
-        "samples": len(per_sample),
-        "psnr": avg_psnr,
-        "ssim": avg_ssim,
-        "l1": avg_l1,
+        "samples": len(records),
+        "checkpoint": str(checkpoint_path),
+        "config_source": config_source,
+        "ssim": float(np.mean([r["metrics"]["ssim"] for r in records])),
+        "psnr": float(np.mean([r["metrics"]["psnr"] for r in records])),
+        "mse": float(np.mean([r["metrics"]["mse"] for r in records])),
+        "mae": float(np.mean([r["metrics"]["mae"] for r in records])),
     }
-    with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump({"summary": summary, "samples": per_sample}, f, indent=2)
+
+    with open(os.path.join(CONFIG.output_dir, "metrics.json"), "w", encoding="utf-8") as f:
+        json.dump({"summary": summary, "samples": records}, f, indent=2)
 
     print(json.dumps(summary, indent=2))
 
